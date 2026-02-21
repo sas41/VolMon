@@ -1,0 +1,35 @@
+## .NET / C#
+bin/
+obj/
+publish/
+*.dll
+*.exe
+*.pdb
+*.user
+*.suo
+*.cache
+*.docstates
+
+## NuGet
+*.nupkg
+**/packages/
+project.lock.json
+project.fragment.lock.json
+
+## IDE
+.vs/
+.vscode/
+.idea/
+*.sln.DotSettings.user
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Rider
+*.sln.iml
+
+## User secrets
+**/appsettings.*.json
+!**/appsettings.json
+!**/appsettings.Development.json

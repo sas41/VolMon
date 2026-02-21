@@ -1,0 +1,247 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:VolMon.GUI.ViewModels"
+        x:Class="VolMon.GUI.Views.MainWindow"
+        Title="VolMon - Audio Group Manager"
+        Icon="avares://VolMon.GUI/Assets/VolMonLogo.png"
+        Width="720" Height="700"
+        MinWidth="520" MinHeight="500"
+        WindowStartupLocation="CenterScreen"
+        Background="#2B2B2B">
+
+    <Design.DataContext>
+        <vm:MainViewModel />
+    </Design.DataContext>
+
+    <DockPanel Margin="8">
+
+        <!-- ═══ STATUS BAR (bottom) ═══ -->
+        <Border DockPanel.Dock="Bottom" Margin="0,6,0,0" Padding="4,4"
+                Background="#242424" CornerRadius="3">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Daemon: " Foreground="#888" FontSize="11" />
+                <TextBlock Text="{Binding DaemonStatusText}"
+                           Foreground="{Binding DaemonStatusColor}" FontSize="11" />
+                <TextBlock Text="     " />
+                <TextBlock Text="{Binding StatusSummary}" Foreground="#666" FontSize="11" />
+            </StackPanel>
+        </Border>
+
+        <!-- ═══ HEADER BAR ═══ -->
+        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+            <TextBlock Text="VolMon" FontSize="20" FontWeight="Bold"
+                       Foreground="White" VerticalAlignment="Center" />
+
+            <Button Content="Add" Command="{Binding AddGroupCommand}"
+                    DockPanel.Dock="Right" Padding="10,4" />
+            <TextBox Text="{Binding NewGroupName}" Watermark="New group..."
+                     DockPanel.Dock="Right" Width="140" Margin="12,0,6,0" />
+        </DockPanel>
+
+        <!-- ═══ GROUP COLUMNS ═══ -->
+        <Border DockPanel.Dock="Top" BorderBrush="#444" BorderThickness="0,0,0,1"
+                Margin="0,0,0,4" Padding="0,0,0,8">
+            <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Disabled">
+                <ItemsControl ItemsSource="{Binding Groups}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal" Spacing="6" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="vm:GroupColumnViewModel">
+                            <Border Width="160" MinHeight="360"
+                                    Background="#363636" CornerRadius="4"
+                                    Padding="6"
+                                    Classes="groupColumn"
+                                    Tag="{Binding Id}"
+                                    DragDrop.AllowDrop="True">
+                                <DockPanel>
+                                    <!-- Group header: drag-handle name + ellipsis menu -->
+                                    <DockPanel DockPanel.Dock="Top" Margin="0,2,0,2">
+                                        <Border DockPanel.Dock="Right"
+                                                Classes="groupMenu"
+                                                Background="Transparent"
+                                                Cursor="Hand"
+                                                Padding="4,2"
+                                                VerticalAlignment="Center">
+                                            <TextBlock Text="⋯" Foreground="#888"
+                                                       FontSize="14" FontWeight="Bold" />
+                                        </Border>
+
+                                        <Border Classes="groupDragHandle"
+                                                Background="Transparent"
+                                                Cursor="SizeAll"
+                                                Padding="0,2">
+                                            <TextBlock Text="{Binding Name}"
+                                                       Foreground="White" FontWeight="SemiBold"
+                                                       FontSize="13" HorizontalAlignment="Center"
+                                                       TextTrimming="CharacterEllipsis" />
+                                        </Border>
+                                    </DockPanel>
+
+                                    <!-- Color accent bar — click to pick color -->
+                                    <Border DockPanel.Dock="Top" Height="6"
+                                            CornerRadius="2"
+                                            Background="{Binding ColorBrush}"
+                                            Margin="0,0,0,6"
+                                            Cursor="Hand"
+                                            Classes="colorBar" />
+
+                                    <!-- Default radio button -->
+                                    <RadioButton DockPanel.Dock="Top"
+                                                 Content="Default" GroupName="DefaultGroup"
+                                                 IsChecked="{Binding IsDefault}"
+                                                 Foreground="#CCCCCC" FontSize="11"
+                                                 Margin="0,0,0,4" HorizontalAlignment="Center" />
+
+                                    <!-- Mute checkbox -->
+                                    <CheckBox DockPanel.Dock="Bottom"
+                                              Content="Muted" IsChecked="{Binding Muted}"
+                                              Foreground="#AAAAAA" FontSize="11"
+                                              HorizontalAlignment="Center"
+                                              Margin="0,4,0,0" />
+
+                                    <!-- Members list — fixed-height scrollable -->
+                                    <Border DockPanel.Dock="Bottom"
+                                            Background="#2E2E2E" CornerRadius="3"
+                                            BorderBrush="#444" BorderThickness="1"
+                                            Margin="0,6,0,0" Padding="2"
+                                            MaxHeight="120" MinHeight="40">
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                      HorizontalScrollBarVisibility="Disabled">
+                                            <ItemsControl ItemsSource="{Binding Members}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate DataType="vm:GroupMemberViewModel">
+                                                        <Border Background="#444" CornerRadius="2"
+                                                                Padding="4,2" Margin="0,1"
+                                                                Classes="draggableMember"
+                                                                Tag="{Binding}">
+                                                            <StackPanel Orientation="Horizontal" Spacing="4">
+                                                                <!-- Disconnected indicator -->
+                                                                <TextBlock Text="⊘" FontSize="9"
+                                                                           IsVisible="{Binding ShowDisconnected}"
+                                                                           Foreground="#666"
+                                                                           VerticalAlignment="Center" />
+                                                                <TextBlock Text="{Binding DisplayName}"
+                                                                           Foreground="{Binding TextBrush}"
+                                                                           FontSize="11"
+                                                                           TextTrimming="CharacterEllipsis" />
+                                                            </StackPanel>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </ScrollViewer>
+                                    </Border>
+
+                                    <!-- Volume slider — centered -->
+                                    <DockPanel Margin="0,4">
+                                        <TextBlock DockPanel.Dock="Bottom"
+                                                   Text="{Binding VolumeText}"
+                                                   Foreground="#AAAAAA" FontSize="11"
+                                                   HorizontalAlignment="Center"
+                                                   Margin="0,2,0,0" />
+                                        <Slider Orientation="Vertical" Minimum="0" Maximum="100"
+                                                Value="{Binding Volume}"
+                                                TickFrequency="1" IsSnapToTickEnabled="True"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Stretch"
+                                                MinHeight="80"
+                                                DragDrop.AllowDrop="False" />
+                                    </DockPanel>
+                                </DockPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+
+        <!-- ═══ AUDIO SOURCES (bottom pools) ═══ -->
+        <TextBlock DockPanel.Dock="Top" Text="AUDIO SOURCES"
+                   Foreground="#AAAAAA" FontWeight="SemiBold" FontSize="13"
+                   Margin="0,4,0,6" />
+
+        <Grid ColumnDefinitions="*,*,*">
+            <!-- Recording Devices -->
+            <DockPanel Grid.Column="0" Margin="0,0,4,0">
+                <TextBlock DockPanel.Dock="Top" Text="RECORDING DEVICES"
+                           Foreground="#FF9500" FontWeight="SemiBold" FontSize="11"
+                           Margin="0,0,0,4" />
+                <Border Background="#333" CornerRadius="4" Padding="4"
+                        MinHeight="80"
+                        Classes="poolArea" Tag="input-device"
+                        DragDrop.AllowDrop="True">
+                    <ItemsControl ItemsSource="{Binding UnassignedInputs}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="vm:PoolItemViewModel">
+                                <Border Background="#444" CornerRadius="2"
+                                        Padding="4,2" Margin="0,1"
+                                        Classes="draggablePool"
+                                        Tag="{Binding}">
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               Foreground="#CCCCCC" FontSize="11"
+                                               TextTrimming="CharacterEllipsis" />
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Border>
+            </DockPanel>
+
+            <!-- Playback Devices -->
+            <DockPanel Grid.Column="1" Margin="2,0,2,0">
+                <TextBlock DockPanel.Dock="Top" Text="PLAYBACK DEVICES"
+                           Foreground="#00B4D8" FontWeight="SemiBold" FontSize="11"
+                           Margin="0,0,0,4" />
+                <Border Background="#333" CornerRadius="4" Padding="4"
+                        MinHeight="80"
+                        Classes="poolArea" Tag="output-device"
+                        DragDrop.AllowDrop="True">
+                    <ItemsControl ItemsSource="{Binding UnassignedOutputs}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="vm:PoolItemViewModel">
+                                <Border Background="#444" CornerRadius="2"
+                                        Padding="4,2" Margin="0,1"
+                                        Classes="draggablePool"
+                                        Tag="{Binding}">
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               Foreground="#CCCCCC" FontSize="11"
+                                               TextTrimming="CharacterEllipsis" />
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Border>
+            </DockPanel>
+
+            <!-- Applications (= Ignored group) -->
+            <DockPanel Grid.Column="2" Margin="4,0,0,0">
+                <TextBlock DockPanel.Dock="Top" Text="APPLICATIONS"
+                           Foreground="#2EC4B6" FontWeight="SemiBold" FontSize="11"
+                           Margin="0,0,0,4" />
+                <Border Background="#333" CornerRadius="4" Padding="4"
+                        MinHeight="80"
+                        Classes="poolArea" Tag="program"
+                        DragDrop.AllowDrop="True">
+                    <ItemsControl ItemsSource="{Binding UnassignedPrograms}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="vm:PoolItemViewModel">
+                                <Border Background="#444" CornerRadius="2"
+                                        Padding="4,2" Margin="0,1"
+                                        Classes="draggablePool"
+                                        Tag="{Binding}">
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               Foreground="#CCCCCC" FontSize="11"
+                                               TextTrimming="CharacterEllipsis" />
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Border>
+            </DockPanel>
+        </Grid>
+    </DockPanel>
+</Window>

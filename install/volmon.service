@@ -1,0 +1,12 @@
+[Unit]
+Description=VolMon Audio Group Volume Daemon
+After=default.target pulseaudio.service pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/volmon-daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

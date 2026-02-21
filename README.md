@@ -18,22 +18,7 @@ volumes natively through the system audio server.
 
 ## Architecture
 
-```
-CLI / GUI  -->  Named Pipes IPC  -->  Daemon  -->  Audio Backend (pactl)
-```
-
-| Component | Description |
-|---|---|
-| **VolMon.Core** | Shared library: audio abstraction, config, IPC protocol |
-| **VolMon.Daemon** | Background service that watches streams and applies rules |
-| **VolMon.CLI** | Command-line interface for managing groups |
-| **VolMon.GUI** | Avalonia system tray app with group editor |
-
-## Requirements
-
-- .NET 10 SDK
-- Linux with PulseAudio or PipeWire (with PulseAudio compatibility)
-- `pactl` command available in PATH
+See [ARCHITECTURE.md](./ARCHITECTURE.md)
 
 ## Quick Start
 

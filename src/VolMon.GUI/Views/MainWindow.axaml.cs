@@ -14,7 +14,6 @@ namespace VolMon.GUI.Views;
 public partial class MainWindow : Window
 {
     private MainViewModel? _viewModel;
-    private DispatcherTimer? _pollTimer;
     private ShortcutBindingViewModel? _listeningBinding;
 
     public MainWindow()
@@ -29,43 +28,10 @@ public partial class MainWindow : Window
         AddHandler(Button.ClickEvent, OnButtonClick, RoutingStrategies.Bubble);
     }
 
-    // ── Auto-refresh timer ───────────────────────────────────────────
-
-    protected override void OnOpened(EventArgs e)
-    {
-        base.OnOpened(e);
-        StartPolling();
-    }
-
-    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
-    {
-        base.OnPropertyChanged(change);
-        if (change.Property == IsVisibleProperty)
-        {
-            if (IsVisible)
-                StartPolling();
-            else
-                StopPolling();
-        }
-    }
-
-    private void StartPolling()
-    {
-        if (_pollTimer is not null) return;
-        _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
-        _pollTimer.Tick += async (_, _) =>
-        {
-            if (_viewModel is not null)
-                await _viewModel.PollAndRefreshAsync();
-        };
-        _pollTimer.Start();
-    }
-
-    private void StopPolling()
-    {
-        _pollTimer?.Stop();
-        _pollTimer = null;
-    }
+    // ── Connection lifecycle ─────────────────────────────────────────
+    // The MainViewModel manages its own persistent connection to the daemon
+    // (with auto-reconnect). No polling timer is needed — state updates are
+    // pushed by the daemon over the duplex IPC connection.
 
     // ── Pointer pressed dispatch ─────────────────────────────────────
 

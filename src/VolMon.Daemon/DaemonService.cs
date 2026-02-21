@@ -17,7 +17,12 @@ public sealed class DaemonService : BackgroundService
     private readonly DateTime _startedAt = DateTime.UtcNow;
 
     private StreamWatcher? _watcher;
-    private IpcServer? _ipcServer;
+    private IpcDuplexServer? _ipcServer;
+
+    // ── Save debounce ────────────────────────────────────────────────
+    private CancellationTokenSource? _saveDebounceCts;
+    private readonly SemaphoreSlim _saveLock = new(1, 1);
+    private const int SaveDebounceMs = 500;
 
     public DaemonService(
         IAudioBackend backend,
@@ -46,6 +51,9 @@ public sealed class DaemonService : BackgroundService
         // Set up stream watcher
         _watcher = new StreamWatcher(_backend, _configManager, _watcherLogger);
 
+        // Subscribe to watcher events for broadcasting to clients
+        _watcher.StateChanged += OnWatcherStateChanged;
+
         // Start audio monitoring
         await _backend.StartMonitoringAsync(stoppingToken);
         _logger.LogInformation("Audio monitoring started");
@@ -54,7 +62,7 @@ public sealed class DaemonService : BackgroundService
         await _watcher.InitialScanAsync(stoppingToken);
 
         // Start IPC server
-        _ipcServer = new IpcServer(HandleIpcRequestAsync);
+        _ipcServer = new IpcDuplexServer(HandleIpcRequestAsync);
         _ipcServer.Start();
         _logger.LogInformation("IPC server started on pipe '{Pipe}'", IpcConstants.PipeName);
 
@@ -74,7 +82,10 @@ public sealed class DaemonService : BackgroundService
 
             await _backend.StopMonitoringAsync();
             _configManager.StopWatching();
+            _watcher.StateChanged -= OnWatcherStateChanged;
             _watcher.Dispose();
+            _saveDebounceCts?.Dispose();
+            _saveLock.Dispose();
         }
     }
 
@@ -85,13 +96,22 @@ public sealed class DaemonService : BackgroundService
             await _watcher.ReassignAllAsync();
     }
 
+    /// <summary>
+    /// Called when the StreamWatcher's state changes (streams added/removed,
+    /// devices changed, etc.). Broadcasts a state snapshot to all connected clients.
+    /// </summary>
+    private async void OnWatcherStateChanged(object? sender, EventArgs e)
+    {
+        await BroadcastStateAsync();
+    }
+
     // ── IPC handler ──────────────────────────────────────────────────
 
     private async Task<IpcResponse> HandleIpcRequestAsync(IpcRequest request, CancellationToken ct)
     {
         try
         {
-            return request.Command switch
+            var response = request.Command switch
             {
                 "list-groups" => HandleListGroups(),
                 "list-streams" => HandleListStreams(),
@@ -114,6 +134,12 @@ public sealed class DaemonService : BackgroundService
                 "reload" => await HandleReloadAsync(ct),
                 _ => new IpcResponse { Success = false, Error = $"Unknown command: {request.Command}" }
             };
+
+            // Broadcast state after any mutation command
+            if (response.Success && IsMutationCommand(request.Command))
+                _ = BroadcastStateAsync();
+
+            return response;
         }
         catch (Exception ex)
         {
@@ -121,6 +147,78 @@ public sealed class DaemonService : BackgroundService
             return new IpcResponse { Success = false, Error = ex.Message };
         }
     }
+
+    /// <summary>
+    /// Returns true for commands that mutate state and should trigger a broadcast.
+    /// </summary>
+    private static bool IsMutationCommand(string command) => command switch
+    {
+        "set-group-volume" or "mute-group" or "unmute-group" or
+        "add-group" or "remove-group" or
+        "add-program" or "remove-program" or
+        "add-device" or "remove-device" or
+        "set-default-group" or "move-group" or
+        "set-group-color" or "rename-group" or
+        "reorder-groups" or "reload" => true,
+        _ => false
+    };
+
+    // ── State broadcasting ───────────────────────────────────────────
+
+    /// <summary>
+    /// Builds a full state snapshot and broadcasts it to all connected clients.
+    /// </summary>
+    private async Task BroadcastStateAsync()
+    {
+        if (_ipcServer is null || _ipcServer.ClientCount == 0) return;
+
+        try
+        {
+            var evt = BuildStateEvent();
+            await _ipcServer.BroadcastAsync(evt);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to broadcast state to clients");
+        }
+    }
+
+    private IpcEvent BuildStateEvent()
+    {
+        return new IpcEvent
+        {
+            Name = "state-changed",
+            Status = new DaemonStatus
+            {
+                Running = true,
+                ActiveStreams = _watcher?.ActiveStreams.Count ?? 0,
+                ActiveDevices = _watcher?.KnownDevices.Count ?? 0,
+                ConfiguredGroups = _configManager.Config.Groups.Count,
+                StartedAt = _startedAt
+            },
+            Groups = _configManager.Config.Groups,
+            Streams = _watcher?.ActiveStreams.Values.Select(s => new AudioStreamInfo
+            {
+                Id = s.Id,
+                BinaryName = s.BinaryName,
+                ApplicationClass = s.ApplicationClass,
+                Volume = s.Volume,
+                Muted = s.Muted,
+                AssignedGroup = s.AssignedGroup
+            }).ToList() ?? [],
+            Devices = _watcher?.KnownDevices.Values.Select(d => new AudioDeviceInfo
+            {
+                Name = d.Name,
+                Description = d.Description,
+                Type = d.Type.ToString().ToLowerInvariant(),
+                Volume = d.Volume,
+                Muted = d.Muted,
+                AssignedGroup = d.AssignedGroup
+            }).ToList() ?? []
+        };
+    }
+
+    // ── Command handlers ─────────────────────────────────────────────
 
     private IpcResponse HandleListGroups() =>
         new() { Success = true, Groups = _configManager.Config.Groups };
@@ -165,7 +263,7 @@ public sealed class DaemonService : BackgroundService
             return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
 
         group.Volume = Math.Clamp(request.Volume.Value, 0, 100);
-        await _configManager.SaveAsync(ct);
+        DebounceSaveAsync(ct);
 
         if (_watcher is not null)
             await _watcher.ApplyGroupSettingsAsync(group, ct);
@@ -180,7 +278,7 @@ public sealed class DaemonService : BackgroundService
             return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
 
         group.Muted = muted;
-        await _configManager.SaveAsync(ct);
+        DebounceSaveAsync(ct);
 
         if (_watcher is not null)
             await _watcher.ApplyGroupSettingsAsync(group, ct);
@@ -371,7 +469,7 @@ public sealed class DaemonService : BackgroundService
             return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
 
         group.Color = request.Color;
-        await _configManager.SaveAsync(ct);
+        DebounceSaveAsync(ct);
 
         return new IpcResponse { Success = true };
     }
@@ -452,8 +550,9 @@ public sealed class DaemonService : BackgroundService
         return new IpcResponse { Success = true };
     }
 
-    private IpcResponse HandleStatus() =>
-        new()
+    private IpcResponse HandleStatus()
+    {
+        var resp = new IpcResponse
         {
             Success = true,
             Status = new DaemonStatus
@@ -463,8 +562,30 @@ public sealed class DaemonService : BackgroundService
                 ActiveDevices = _watcher?.KnownDevices.Count ?? 0,
                 ConfiguredGroups = _configManager.Config.Groups.Count,
                 StartedAt = _startedAt
-            }
+            },
+            Groups = _configManager.Config.Groups,
+            Streams = _watcher?.ActiveStreams.Values.Select(s => new AudioStreamInfo
+            {
+                Id = s.Id,
+                BinaryName = s.BinaryName,
+                ApplicationClass = s.ApplicationClass,
+                Volume = s.Volume,
+                Muted = s.Muted,
+                AssignedGroup = s.AssignedGroup
+            }).ToList() ?? [],
+            Devices = _watcher?.KnownDevices.Values.Select(d => new AudioDeviceInfo
+            {
+                Name = d.Name,
+                Description = d.Description,
+                Type = d.Type.ToString().ToLowerInvariant(),
+                Volume = d.Volume,
+                Muted = d.Muted,
+                AssignedGroup = d.AssignedGroup
+            }).ToList() ?? []
         };
+
+        return resp;
+    }
 
     private async Task<IpcResponse> HandleReloadAsync(CancellationToken ct)
     {
@@ -474,6 +595,43 @@ public sealed class DaemonService : BackgroundService
 
         return new IpcResponse { Success = true };
     }
+
+    // ── Debounced config save ────────────────────────────────────────
+
+    /// <summary>
+    /// Schedules a config save after a debounce delay. Rapid calls (e.g. from
+    /// volume slider drags) are coalesced into a single disk write.
+    /// </summary>
+    private void DebounceSaveAsync(CancellationToken ct)
+    {
+        _saveDebounceCts?.Cancel();
+        _saveDebounceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var token = _saveDebounceCts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(SaveDebounceMs, token);
+                await _saveLock.WaitAsync(token);
+                try
+                {
+                    await _configManager.SaveAsync(token);
+                }
+                finally
+                {
+                    _saveLock.Release();
+                }
+            }
+            catch (OperationCanceledException) { /* debounced away */ }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to save config (debounced)");
+            }
+        }, CancellationToken.None);
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────
 
     /// <summary>
     /// Ensures the permanent "Ignored" group exists in config.

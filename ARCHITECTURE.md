@@ -30,8 +30,8 @@ The codebase is C# / .NET 10, split into four projects.
 management, and the audio backend abstraction. **VolMon.Daemon** is a
 background service (systemd user unit on Linux) that monitors audio streams,
 enforces group volume rules, and hosts the IPC server. **VolMon.CLI** and
-**VolMon.GUI** are thin clients that send commands to the daemon over named
-pipes.
+**VolMon.GUI** are thin clients that communicate with the daemon over named
+pipes using a persistent duplex connection.
 
 ## Data Flow
 
@@ -60,31 +60,58 @@ Platform audio events  ──▸  IAudioBackend implementation
                        │ • Assign to default  │
                        │   group if unmatched │
                        │ • Apply volume/mute  │
+                       │ • Raise StateChanged │
+                       │   (100ms debounce)   │
                        └──────────────────────┘
+                                  │
+                                  ▼
+                       DaemonService broadcasts
+                       state-changed event to
+                       all connected IPC clients
 ```
 
 Each backend pushes events as they occur (Linux via `pactl subscribe`, Windows
 via COM callbacks, macOS via CoreAudio property listeners). The daemon reacts to
-each event — there is no polling on the daemon side.
+each event — there is no polling on the daemon side. `StreamWatcher` debounces
+its `StateChanged` event (100ms) to coalesce rapid-fire audio events (e.g.
+applying volume to multiple streams) into a single broadcast.
 
-### IPC Request/Response
+### IPC Protocol (Duplex)
 
 ```
-CLI or GUI                           Daemon
+CLI                                  Daemon
     │                                   │
     ├──connect to named pipe───────────▸│
-    ├──send JSON request + newline─────▸│
+    ├──send IpcMessage(request)────────▸│
     │                                   ├── HandleIpcRequestAsync()
-    │                                   │   ├── ResolveGroup(request)
-    │                                   │   ├── execute command
-    │                                   │   └── build IpcResponse
-    │◂─receive JSON response + newline──┤
-    ├──close connection                 │
+    │◂─IpcMessage(response)────────────┤
+    ├──dispose (close connection)       │
+
+GUI                                  Daemon
+    │                                   │
+    ├──connect to named pipe───────────▸│
+    ├──send IpcMessage(request:status)─▸│
+    │◂─IpcMessage(response:full state)─┤
+    │                                   │
+    │◂─IpcMessage(event:state-changed)─┤  ← push on any mutation
+    │◂─IpcMessage(event:state-changed)─┤  ← push on audio events
+    │                                   │
+    ├──send IpcMessage(request)────────▸│  ← user actions (volume, etc.)
+    │◂─IpcMessage(response)────────────┤
+    │  ... (connection stays open) ...  │
 ```
 
-Each request opens a new pipe connection, sends one JSON line, receives one
-JSON line, then disconnects. This keeps the protocol stateless and avoids
-connection lifecycle complexity.
+The protocol uses persistent duplex connections. Each client connects once and
+the connection stays open for the lifetime of the client. The daemon pushes
+`state-changed` events to all connected clients whenever state mutates (IPC
+commands, audio backend events, config changes). This eliminates polling.
+
+**CLI** connects, sends one request, receives the response, then disconnects.
+Push events that arrive during the brief connection are ignored.
+
+**GUI** connects at startup and stays connected. It receives push events and
+updates the UI reactively. If the connection drops, it auto-reconnects after 3
+seconds.
 
 ## Core Models
 
@@ -240,27 +267,54 @@ unavailable.
 **Transport:** .NET named pipes (`System.IO.Pipes`), pipe name `volmon-daemon`.
 On Linux the actual socket is at `/tmp/CoreFxPipe_volmon-daemon`.
 
-**Format:** Newline-delimited JSON. One request line, one response line.
+**Format:** Newline-delimited JSON. Each message is a single JSON line
+containing an `IpcMessage` envelope.
 
 **Serialization:** `System.Text.Json` with camelCase naming and enum-as-string
 conversion (`IpcSerializer`).
+
+### IpcMessage Envelope
+
+Every message on the wire is an `IpcMessage`:
+
+|Field|Type|Purpose|
+|---|---|---|
+|`Type`|`IpcMessageType`|`request`, `response`, or `event`|
+|`Id`|`Guid`|Correlation ID (set on requests, echoed on responses)|
+|`Request`|`IpcRequest?`|Populated for `request` messages|
+|`Response`|`IpcResponse?`|Populated for `response` messages|
+|`Event`|`IpcEvent?`|Populated for `event` messages|
 
 ### IpcRequest
 
 |Field|Type|Purpose|
 |---|---|---|
-Command|(required)|the operation to perform
-GroupId|(Guid?)|preferred group identifier (GUI uses this)
-GroupName|(string?)|fallback group identifier (CLI uses this)
-Volume|(int?)|for set-group-volume
-ProgramName|(string?)|for add-program / remove-program
-DeviceName|(string?)|for add-device / remove-device
-Group|(AudioGroup?)|full group object for add-group
-Direction|(string?)|"up"/"down" for move-group
-Color|(string?)|hex string for set-group-color
-NewName|(string?)|for rename-group
-GroupOrder|(List<string>?)|for reorder-groups
+|Command|(required)|the operation to perform|
+|GroupId|(Guid?)|preferred group identifier (GUI uses this)|
+|GroupName|(string?)|fallback group identifier (CLI uses this)|
+|Volume|(int?)|for set-group-volume|
+|ProgramName|(string?)|for add-program / remove-program|
+|DeviceName|(string?)|for add-device / remove-device|
+|Group|(AudioGroup?)|full group object for add-group|
+|Direction|(string?)|"up"/"down" for move-group|
+|Color|(string?)|hex string for set-group-color|
+|NewName|(string?)|for rename-group|
+|GroupOrder|(List\<string\>?)|for reorder-groups|
 
+### IpcEvent
+
+|Field|Type|Purpose|
+|---|---|---|
+|`Name`|`string`|Event type (currently only `"state-changed"`)|
+|`Groups`|`List<AudioGroup>?`|Full group list snapshot|
+|`Streams`|`List<AudioStreamInfo>?`|Full stream list snapshot|
+|`Devices`|`List<AudioDeviceInfo>?`|Full device list snapshot|
+|`Status`|`DaemonStatus?`|Daemon health info|
+
+The daemon broadcasts a `state-changed` event containing a full state snapshot
+after every mutation command and whenever the `StreamWatcher` detects audio
+backend changes. This is the sole mechanism for GUI state updates — the GUI
+does not poll.
 
 ### Commands
 
@@ -269,7 +323,7 @@ GroupOrder|(List<string>?)|for reorder-groups
 |`list-groups`|Return all configured groups |
 |`list-streams`|Return all active audio streams with assignments |
 |`list-devices`|Return all hardware audio devices |
-|`set-group-olume`|Set volume for a group (0-100) |
+|`set-group-volume`|Set volume for a group (0-100) |
 |`mute-group`/`unmute-group`|Toggle mute on a group |
 |`add-group`|Create a new group |
 |`remove-group`|Delete a group |
@@ -278,9 +332,9 @@ GroupOrder|(List<string>?)|for reorder-groups
 |`add-device`|Add a device to a group |
 |`remove-device`|Remove a device from a group |
 |`rename-group`|Change a group's display name |
-|`set-group-olor` |Change a group's GUI color |
+|`set-group-color`|Change a group's GUI color |
 |`reorder-groups`|Set the display order of groups |
-|`status`|Daemon health, counts, uptime |
+|`status`|Daemon health, counts, uptime, full state |
 |`reload`|Re-read config from disk |
 
 ## Daemon Internals
@@ -290,12 +344,26 @@ GroupOrder|(List<string>?)|for reorder-groups
 A `BackgroundService` that orchestrates everything:
 
 1. Loads config and runs GUID migration
-2. Creates the IPC server and registers command handlers
+2. Creates the `IpcDuplexServer` and registers command handlers
 3. Starts the `StreamWatcher`
 4. Handles 18 IPC commands in a `switch` statement
+5. Broadcasts `state-changed` events to all connected clients after mutations
+6. Debounces config saves (500ms) for high-frequency operations (volume, mute,
+   color) to avoid excessive disk I/O during slider drags
 
-Config changes are persisted to disk via `ConfigManager.SaveAsync()` after
-every mutation.
+### IpcDuplexServer
+
+The duplex named pipe server that replaced the old one-shot `IpcServer`:
+
+- Accepts multiple concurrent persistent connections
+  (`MaxAllowedServerInstances`)
+- Each client gets a dedicated read loop running on a background thread
+- Command handler execution is serialized via `SemaphoreSlim(1,1)` — the daemon
+  handler is not thread-safe
+- Per-client write serialization via `SemaphoreSlim` prevents broadcast and
+  response writes from interleaving
+- `BroadcastAsync(IpcEvent)` sends an event to all connected clients; clients
+  that fail to receive are silently disconnected
 
 ### StreamWatcher
 
@@ -307,6 +375,8 @@ Subscribes to `IAudioBackend` events and maintains group assignments:
   auto-assign — only matches explicitly listed devices.
 - **`ApplyGroupSettingsAsync`**: Sets volume and mute state on all streams
   and devices belonging to a group.
+- **`StateChanged`**: Debounced event (100ms) raised on stream/device changes.
+  The daemon subscribes to this to broadcast state updates to IPC clients.
 
 ## GUI Architecture
 
@@ -315,19 +385,34 @@ Built with **Avalonia UI 11** using MVVM (ReactiveUI).
 ### Key Components
 
 **MainViewModel** — root view model:
-- Polls daemon via IPC every 250ms (`DispatcherTimer`, visibility-aware)
-- Only does a full refresh when daemon status counts change (stream/device/group counts)
+- Connects to the daemon via `IpcDuplexClient` on startup (persistent
+  connection with auto-reconnect on disconnect)
+- Receives push `state-changed` events from the daemon — no polling
+- Reconciles `ObservableCollection` contents via key-based diff-merge
+  (`CollectionReconciler`) to avoid UI flicker from clear/re-add
 - Two-pass stream dedup: Pass 1 determines "best" group per binary name
   (real group wins over Ignored/null), Pass 2 places each binary exactly once
 - Exposes `ObservableCollection<GroupColumnViewModel>` for group columns
   and `ObservableCollection<PoolItemViewModel>` for the Applications pool
 
+**IpcDuplexClient** — shared by GUI and CLI:
+- Maintains a persistent named pipe connection with a background read loop
+- `SendAsync(request)` sends a request and awaits the correlated response
+  (matched by `IpcMessage.Id`)
+- `SendFireAndForgetAsync(request)` sends without awaiting a response (used
+  for high-frequency volume/mute changes where the push event suffices)
+- `EventReceived` event delivers push notifications from the daemon
+- `Disconnected` event fires when the connection drops
+
 **GroupColumnViewModel** — one per group column:
 - Wraps `AudioGroup` properties (Id, Name, Volume, Muted, Color)
 - 80ms volume debounce (CancellationTokenSource-based) to prevent IPC spam
   during slider drags
-- Volume/mute changes use `SendQuietAsync` (no refresh) to avoid UI flicker
-- Delete and default-toggle use `SendCommandAsync` (triggers refresh)
+- Volume/mute changes use `SendFireAndForgetAsync` (fire-and-forget — the
+  daemon push event updates the UI)
+- `UpdateFrom()` patches properties in place from pushed state, skipping
+  volume while a debounce is pending and muted while a command is in-flight
+- Delete and default-toggle use `SendAsync` (waits for response)
 
 **MainWindow.axaml.cs** — code-behind for drag-drop and UI interactions:
 - Programs and devices are draggable between groups and the Applications pool
@@ -335,6 +420,7 @@ Built with **Avalonia UI 11** using MVVM (ReactiveUI).
 - Color picker: 20-swatch flyout on accent bar click
 - Ellipsis menu: Rename (flyout TextBox) and Delete
 - `IsInsideInteractiveControl()` guard prevents drag initiation from sliders
+- No polling timer — state updates are purely event-driven
 
 ### Applications Pool = Ignored Group
 
@@ -376,7 +462,9 @@ icon and greyed text. The `IsRunning` property is computed by cross-referencing
 ```
 
 `ConfigManager` handles load, save, and file-watching (to detect external
-edits). The `reload` IPC command triggers a re-read.
+edits). The `reload` IPC command triggers a re-read. High-frequency mutations
+(volume, mute, color) use debounced saves (500ms) to coalesce rapid changes
+into a single disk write.
 
 ## Deployment
 
@@ -393,7 +481,6 @@ user's PulseAudio/PipeWire session.
 
 ## Future Work
 
-- Diff-based ObservableCollection merging (instead of Clear+Rebuild) to eliminate potential UI flicker
 - Drag visual feedback and drop target highlighting
 - Per-stream volume overrides within a group
 - macOS per-app audio control via virtual audio driver integration

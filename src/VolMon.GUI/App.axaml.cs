@@ -42,7 +42,7 @@ public class App : Application
             // Set up tray icon
             var trayIcon = new TrayIcon
             {
-                ToolTipText = "VolMon - Audio Group Manager",
+                ToolTipText = "VolMon - Volume Monitoring and Control",
                 IsVisible = true,
                 Icon = new WindowIcon(
                     AssetLoader.Open(new Uri("avares://VolMon.GUI/Assets/VolMonLogo.png")))

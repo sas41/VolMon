@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Reactive;
 using System.Reactive.Linq;
 using Avalonia.Media;
+using Avalonia.Threading;
 using ReactiveUI;
 using VolMon.Core.Audio;
 using VolMon.Core.Config;
@@ -9,6 +10,87 @@ using VolMon.Core.Ipc;
 using VolMon.GUI.Services;
 
 namespace VolMon.GUI.ViewModels;
+
+// ═════════════════════════════════════════════════════════════════════
+// ObservableCollection diff-merge helper
+// ═════════════════════════════════════════════════════════════════════
+
+/// <summary>
+/// Reconciles an <see cref="ObservableCollection{T}"/> with a desired list of
+/// items using a key-based diff: removes stale items, updates matching items
+/// in place, and inserts new items — all without clearing the collection.
+///
+/// This avoids the UI flicker caused by Clear() + re-Add() and preserves
+/// object identity for items that still exist (e.g. keeping slider drag
+/// state, debounce timers, scroll position).
+/// </summary>
+internal static class CollectionReconciler
+{
+    /// <summary>
+    /// Reconciles <paramref name="collection"/> to match <paramref name="desired"/>.
+    /// Items are matched by key. Matched items are updated via <paramref name="update"/>.
+    /// Order is preserved to match <paramref name="desired"/>.
+    /// </summary>
+    public static void Reconcile<TItem, TKey>(
+        ObservableCollection<TItem> collection,
+        IReadOnlyList<TItem> desired,
+        Func<TItem, TKey> keyOf,
+        Action<TItem, TItem>? update = null) where TKey : notnull
+    {
+        // Build set of desired keys for removal pass
+        var desiredKeys = new HashSet<TKey>();
+        foreach (var item in desired)
+            desiredKeys.Add(keyOf(item));
+
+        // Pass 1: Remove items no longer in the desired set
+        for (int i = collection.Count - 1; i >= 0; i--)
+        {
+            if (!desiredKeys.Contains(keyOf(collection[i])))
+                collection.RemoveAt(i);
+        }
+
+        // Pass 2: Upsert and reorder to match desired
+        for (int i = 0; i < desired.Count; i++)
+        {
+            var desiredKey = keyOf(desired[i]);
+
+            if (i < collection.Count && EqualityComparer<TKey>.Default.Equals(keyOf(collection[i]), desiredKey))
+            {
+                // Already in the right position — update in place
+                update?.Invoke(collection[i], desired[i]);
+            }
+            else
+            {
+                // Find this key elsewhere in the collection
+                var existingIndex = -1;
+                for (int j = i + 1; j < collection.Count; j++)
+                {
+                    if (EqualityComparer<TKey>.Default.Equals(keyOf(collection[j]), desiredKey))
+                    {
+                        existingIndex = j;
+                        break;
+                    }
+                }
+
+                if (existingIndex >= 0)
+                {
+                    // Move existing item to the correct position
+                    collection.Move(existingIndex, i);
+                    update?.Invoke(collection[i], desired[i]);
+                }
+                else
+                {
+                    // New item — insert at the correct position
+                    collection.Insert(i, desired[i]);
+                }
+            }
+        }
+
+        // Pass 3: Trim any trailing excess (shouldn't happen, but safety)
+        while (collection.Count > desired.Count)
+            collection.RemoveAt(collection.Count - 1);
+    }
+}
 
 public class MainViewModel : ReactiveObject
 {
@@ -19,15 +101,14 @@ public class MainViewModel : ReactiveObject
         "#3498DB", "#E67E22"
     ];
 
-    private readonly IpcClient _client = new();
+    private IpcDuplexClient? _client;
     private Guid? _ignoredGroupId;
-    private DaemonStatus? _lastStatus;
-    private bool _isRefreshing;
+    private bool _isConnecting;
 
     // ── Shortcut target state ────────────────────────────────────────
     private Guid? _targetGroupId;
 
-    private string _daemonStatusText = "Checking...";
+    private string _daemonStatusText = "Connecting...";
     private IBrush _daemonStatusColor = Brushes.Gray;
     private string _statusSummary = "";
     private string _newGroupName = "";
@@ -86,44 +167,42 @@ public class MainViewModel : ReactiveObject
         });
 
         _ = LoadShortcutBindingsAsync();
-        _ = RefreshAsync();
+        _ = ConnectAsync();
     }
 
-    // ── Auto-refresh polling ─────────────────────────────────────────
+    // ── Connection management ────────────────────────────────────────
 
     /// <summary>
-    /// Called by the UI timer (~4×/sec). Only does a full refresh when
-    /// the daemon's stream/device/group counts have changed.
+    /// Connects to the daemon with automatic reconnection on failure.
+    /// Called on startup and when the connection drops.
     /// </summary>
-    public async Task PollAndRefreshAsync()
+    public async Task ConnectAsync()
     {
-        if (_isRefreshing) return;
-        _isRefreshing = true;
+        if (_isConnecting) return;
+        _isConnecting = true;
+
         try
         {
+            // Dispose any existing client
+            if (_client is not null)
+            {
+                _client.EventReceived -= OnEventReceived;
+                _client.Disconnected -= OnDisconnected;
+                await _client.DisposeAsync();
+                _client = null;
+            }
+
+            _client = new IpcDuplexClient();
+            _client.EventReceived += OnEventReceived;
+            _client.Disconnected += OnDisconnected;
+
+            await _client.ConnectAsync();
+
+            // Request initial state
             var resp = await _client.SendAsync(new IpcRequest { Command = "status" });
-            if (!resp.Success || resp.Status is null)
+            if (resp.Success && resp.Status is not null)
             {
-                DaemonStatusText = "Not responding";
-                DaemonStatusColor = Brushes.Red;
-                StatusSummary = "";
-                _lastStatus = null;
-                return;
-            }
-
-            var s = resp.Status;
-            if (_lastStatus is null ||
-                _lastStatus.ActiveStreams != s.ActiveStreams ||
-                _lastStatus.ActiveDevices != s.ActiveDevices ||
-                _lastStatus.ConfiguredGroups != s.ConfiguredGroups)
-            {
-                _lastStatus = s;
-                await RefreshDataAsync(s);
-            }
-            else
-            {
-                DaemonStatusText = "Running";
-                DaemonStatusColor = Brushes.Green;
+                Dispatcher.UIThread.Post(() => RefreshData(resp));
             }
         }
         catch
@@ -131,88 +210,112 @@ public class MainViewModel : ReactiveObject
             DaemonStatusText = "Not running";
             DaemonStatusColor = Brushes.Red;
             StatusSummary = "Cannot connect to daemon";
-            _lastStatus = null;
+
+            // Retry after a delay
+            _ = ReconnectAfterDelayAsync();
         }
         finally
         {
-            _isRefreshing = false;
+            _isConnecting = false;
         }
     }
 
-    // ── Full refresh ─────────────────────────────────────────────────
+    private async Task ReconnectAfterDelayAsync()
+    {
+        await Task.Delay(3000);
+        await ConnectAsync();
+    }
 
     /// <summary>
-    /// Full refresh — fetches status + all data. Called on startup and
-    /// after every user-initiated IPC command (add/delete/rename/etc.).
+    /// Called when the daemon pushes a state-changed event.
     /// </summary>
-    public async Task RefreshAsync()
+    private void OnEventReceived(object? sender, IpcEvent evt)
     {
-        if (_isRefreshing) return;
-        _isRefreshing = true;
-        try
+        if (evt.Name != "state-changed") return;
+
+        // Marshal to UI thread
+        Dispatcher.UIThread.Post(() =>
         {
-            var statusResp = await _client.SendAsync(new IpcRequest { Command = "status" });
-            if (statusResp.Success && statusResp.Status is { } status)
+            var resp = new IpcResponse
             {
-                _lastStatus = status;
-                await RefreshDataAsync(status);
-            }
-            else
-            {
-                DaemonStatusText = "Not responding";
-                DaemonStatusColor = Brushes.Red;
-            }
-        }
-        catch
-        {
-            DaemonStatusText = "Not running";
-            DaemonStatusColor = Brushes.Red;
-            StatusSummary = "Cannot connect to daemon";
-        }
-        finally
-        {
-            _isRefreshing = false;
-        }
+                Success = true,
+                Status = evt.Status,
+                Groups = evt.Groups,
+                Streams = evt.Streams,
+                Devices = evt.Devices
+            };
+            RefreshData(resp);
+        });
     }
 
-    private async Task RefreshDataAsync(DaemonStatus status)
+    /// <summary>
+    /// Called when the persistent connection drops.
+    /// </summary>
+    private void OnDisconnected(object? sender, EventArgs e)
     {
-        DaemonStatusText = "Running";
-        DaemonStatusColor = Brushes.Green;
-        StatusSummary = $"Streams: {status.ActiveStreams}  |  Devices: {status.ActiveDevices}  |  Groups: {status.ConfiguredGroups}";
+        Dispatcher.UIThread.Post(() =>
+        {
+            DaemonStatusText = "Disconnected";
+            DaemonStatusColor = Brushes.Red;
+            StatusSummary = "Connection to daemon lost";
+        });
+
+        // Auto-reconnect
+        _ = ReconnectAfterDelayAsync();
+    }
+
+    // ── Data refresh (called from push events) ───────────────────────
+
+    private void RefreshData(IpcResponse resp)
+    {
+        var status = resp.Status;
+        if (status is not null)
+        {
+            DaemonStatusText = "Running";
+            DaemonStatusColor = Brushes.Green;
+            StatusSummary = $"Streams: {status.ActiveStreams}  |  Devices: {status.ActiveDevices}  |  Groups: {status.ConfiguredGroups}";
+        }
 
         // ── Groups (Ignored group hidden from columns)
-        var groupsResp = await _client.SendAsync(new IpcRequest { Command = "list-groups" });
-        Groups.Clear();
         _ignoredGroupId = null;
 
-        if (groupsResp.Groups is not null)
+        var desiredGroups = new List<GroupColumnViewModel>();
+        if (resp.Groups is not null)
         {
             var ci = 0;
-            foreach (var g in groupsResp.Groups)
+            foreach (var g in resp.Groups)
             {
                 if (g.IsIgnored) { _ignoredGroupId = g.Id; continue; }
                 var color = g.Color ?? ColorPalette[ci % ColorPalette.Length];
-                Groups.Add(new GroupColumnViewModel(g, color, SendCommandAsync, SendQuietAsync));
+                desiredGroups.Add(new GroupColumnViewModel(g, color, SendCommandAsync, SendQuietAsync));
                 ci++;
             }
         }
 
-        // ── Streams → group members or Applications pool
-        // A single program (e.g. Firefox) can have multiple PulseAudio streams
-        // (one per tab). We deduplicate by binary name so each program appears
-        // only once — either in its assigned group or in the Applications pool.
-        //
-        // Two-pass approach: first collect per-binary "best" assignment (a real
-        // group wins over Ignored/unassigned), then place each binary exactly once.
-        var streamsResp = await _client.SendAsync(new IpcRequest { Command = "list-streams" });
-        UnassignedPrograms.Clear();
+        CollectionReconciler.Reconcile(Groups, desiredGroups,
+            keyOf: g => g.Id,
+            update: (existing, fresh) => existing.UpdateFrom(fresh));
 
-        if (streamsResp.Streams is not null)
+        // ── Streams → group members or Applications pool
+        // A single program (e.g. Firefox) can have multiple streams (one per
+        // tab). We deduplicate by binary name so each program appears only
+        // once — either in its assigned group or in the Applications pool.
+        //
+        // Two-pass: first collect per-binary "best" assignment (a real group
+        // wins over Ignored/unassigned), then place each binary exactly once.
+
+        // Per-group members built into temporary lists, then reconciled
+        var desiredMembers = new Dictionary<Guid, List<GroupMemberViewModel>>();
+        foreach (var gvm in Groups)
+            desiredMembers[gvm.Id] = new List<GroupMemberViewModel>();
+
+        var desiredPrograms = new List<PoolItemViewModel>();
+
+        if (resp.Streams is not null)
         {
             var bestAssignment = new Dictionary<string, Guid?>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var s in streamsResp.Streams)
+            foreach (var s in resp.Streams)
             {
                 var isIgnoredOrNull = s.AssignedGroup is null ||
                     (_ignoredGroupId.HasValue && s.AssignedGroup == _ignoredGroupId.Value);
@@ -229,15 +332,14 @@ public class MainViewModel : ReactiveObject
 
             foreach (var (binary, groupId) in bestAssignment)
             {
-                if (groupId is { } assignedId)
+                if (groupId is { } assignedId && desiredMembers.ContainsKey(assignedId))
                 {
-                    var gvm = Groups.FirstOrDefault(g => g.Id == assignedId);
-                    gvm?.Members.Add(new GroupMemberViewModel(
+                    desiredMembers[assignedId].Add(new GroupMemberViewModel(
                         binary, "program", binary, assignedId, isRunning: true));
                 }
                 else
                 {
-                    UnassignedPrograms.Add(new PoolItemViewModel(binary, "program", binary));
+                    desiredPrograms.Add(new PoolItemViewModel(binary, "program", binary));
                 }
             }
         }
@@ -245,7 +347,7 @@ public class MainViewModel : ReactiveObject
         // ── Disconnected programs: configured in a group but not currently running
         foreach (var gvm in Groups)
         {
-            var running = gvm.Members
+            var running = desiredMembers[gvm.Id]
                 .Where(m => m.ItemType == "program")
                 .Select(m => m.Identifier)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -254,38 +356,66 @@ public class MainViewModel : ReactiveObject
             {
                 if (!running.Contains(prog))
                 {
-                    gvm.Members.Add(new GroupMemberViewModel(
+                    desiredMembers[gvm.Id].Add(new GroupMemberViewModel(
                         prog, "program", prog, gvm.Id, isRunning: false));
                 }
             }
         }
 
         // ── Devices → group members or device pools
-        var devResp = await _client.SendAsync(new IpcRequest { Command = "list-devices" });
-        UnassignedInputs.Clear();
-        UnassignedOutputs.Clear();
+        var desiredInputs = new List<PoolItemViewModel>();
+        var desiredOutputs = new List<PoolItemViewModel>();
 
-        if (devResp.Devices is not null)
+        if (resp.Devices is not null)
         {
-            foreach (var d in devResp.Devices)
+            foreach (var d in resp.Devices)
             {
                 var display = d.Description ?? d.Name;
                 var isInput = d.Type.Equals("source", StringComparison.OrdinalIgnoreCase);
                 var itemType = isInput ? "input-device" : "output-device";
 
-                if (d.AssignedGroup is { } devGroupId)
+                if (d.AssignedGroup is { } devGroupId && desiredMembers.ContainsKey(devGroupId))
                 {
-                    var gvm = Groups.FirstOrDefault(g => g.Id == devGroupId);
-                    gvm?.Members.Add(new GroupMemberViewModel(
+                    desiredMembers[devGroupId].Add(new GroupMemberViewModel(
                         display, itemType, d.Name, devGroupId, isRunning: true));
                 }
                 else
                 {
-                    (isInput ? UnassignedInputs : UnassignedOutputs)
+                    (isInput ? desiredInputs : desiredOutputs)
                         .Add(new PoolItemViewModel(display, itemType, d.Name));
                 }
             }
         }
+
+        // ── Reconcile all member collections
+        foreach (var gvm in Groups)
+        {
+            if (desiredMembers.TryGetValue(gvm.Id, out var members))
+            {
+                CollectionReconciler.Reconcile(gvm.Members, members,
+                    keyOf: m => (m.ItemType, m.Identifier),
+                    update: (existing, fresh) =>
+                    {
+                        // GroupMemberViewModel is immutable — replace if state differs
+                        if (existing.IsRunning != fresh.IsRunning ||
+                            existing.DisplayName != fresh.DisplayName)
+                        {
+                            var idx = gvm.Members.IndexOf(existing);
+                            if (idx >= 0) gvm.Members[idx] = fresh;
+                        }
+                    });
+            }
+        }
+
+        // ── Reconcile pool collections
+        CollectionReconciler.Reconcile(UnassignedPrograms, desiredPrograms,
+            keyOf: p => (p.ItemType, p.Identifier));
+
+        CollectionReconciler.Reconcile(UnassignedInputs, desiredInputs,
+            keyOf: p => (p.ItemType, p.Identifier));
+
+        CollectionReconciler.Reconcile(UnassignedOutputs, desiredOutputs,
+            keyOf: p => (p.ItemType, p.Identifier));
     }
 
     // ── Group actions ────────────────────────────────────────────────
@@ -293,7 +423,7 @@ public class MainViewModel : ReactiveObject
     private async Task AddGroupAsync()
     {
         var name = NewGroupName.Trim();
-        if (string.IsNullOrEmpty(name)) return;
+        if (string.IsNullOrEmpty(name) || _client is null) return;
 
         await _client.SendAsync(new IpcRequest
         {
@@ -302,18 +432,20 @@ public class MainViewModel : ReactiveObject
         });
 
         NewGroupName = "";
-        await RefreshAsync();
+        // No need to RefreshAsync — the daemon will push a state-changed event
     }
 
     public async Task RenameGroupAsync(Guid groupId, string newName)
     {
+        if (_client is null) return;
+
         await _client.SendAsync(new IpcRequest
         {
             Command = "rename-group",
             GroupId = groupId,
             NewName = newName
         });
-        await RefreshAsync();
+        // No need to RefreshAsync — the daemon will push a state-changed event
     }
 
     // ── Shortcut settings ───────────────────────────────────────────
@@ -325,12 +457,22 @@ public class MainViewModel : ReactiveObject
         catch { /* defaults */ }
 
         var sc = configManager.Config.Shortcuts;
-        ShortcutBindings.Clear();
-        ShortcutBindings.Add(new ShortcutBindingViewModel("Volume Up", nameof(sc.VolumeUp), sc.VolumeUp));
-        ShortcutBindings.Add(new ShortcutBindingViewModel("Volume Down", nameof(sc.VolumeDown), sc.VolumeDown));
-        ShortcutBindings.Add(new ShortcutBindingViewModel("Next Group", nameof(sc.SelectNextGroup), sc.SelectNextGroup));
-        ShortcutBindings.Add(new ShortcutBindingViewModel("Previous Group", nameof(sc.SelectPreviousGroup), sc.SelectPreviousGroup));
-        ShortcutBindings.Add(new ShortcutBindingViewModel("Mute Toggle", nameof(sc.MuteToggle), sc.MuteToggle));
+        var desired = new List<ShortcutBindingViewModel>
+        {
+            new("Volume Up", nameof(sc.VolumeUp), sc.VolumeUp),
+            new("Volume Down", nameof(sc.VolumeDown), sc.VolumeDown),
+            new("Next Group", nameof(sc.SelectNextGroup), sc.SelectNextGroup),
+            new("Previous Group", nameof(sc.SelectPreviousGroup), sc.SelectPreviousGroup),
+            new("Mute Toggle", nameof(sc.MuteToggle), sc.MuteToggle)
+        };
+
+        CollectionReconciler.Reconcile(ShortcutBindings, desired,
+            keyOf: s => s.ConfigProperty,
+            update: (existing, fresh) =>
+            {
+                if (existing.KeyCode != fresh.KeyCode)
+                    existing.KeyCode = fresh.KeyCode;
+            });
     }
 
     /// <summary>
@@ -380,17 +522,21 @@ public class MainViewModel : ReactiveObject
 
     public async Task AssignToGroupAsync(Guid groupId, string itemType, string id)
     {
+        if (_client is null) return;
+
         var cmd = itemType == "program" ? "add-program" : "add-device";
         var req = itemType == "program"
             ? new IpcRequest { Command = cmd, GroupId = groupId, ProgramName = id }
             : new IpcRequest { Command = cmd, GroupId = groupId, DeviceName = id };
 
         await _client.SendAsync(req);
-        await RefreshAsync();
+        // No need to RefreshAsync — the daemon will push a state-changed event
     }
 
     public async Task ReturnToPoolAsync(Guid currentGroupId, string itemType, string id)
     {
+        if (_client is null) return;
+
         if (itemType == "program" && _ignoredGroupId.HasValue)
         {
             await _client.SendAsync(new IpcRequest
@@ -418,11 +564,13 @@ public class MainViewModel : ReactiveObject
                 DeviceName = id
             });
         }
-        await RefreshAsync();
+        // No need to RefreshAsync — the daemon will push a state-changed event
     }
 
     public async Task ReorderGroupAsync(Guid sourceId, Guid targetId)
     {
+        if (_client is null) return;
+
         var src = Groups.FirstOrDefault(g => g.Id == sourceId);
         var tgt = Groups.FirstOrDefault(g => g.Id == targetId);
         if (src is null || tgt is null || src == tgt) return;
@@ -545,15 +693,26 @@ public class MainViewModel : ReactiveObject
 
     // ── IPC helpers ──────────────────────────────────────────────────
 
+    /// <summary>
+    /// Sends a command and waits for the response. Used for structural changes
+    /// like delete and set-default where we need the response.
+    /// The daemon will push a state-changed event afterward, so no manual
+    /// refresh is needed.
+    /// </summary>
     private async Task SendCommandAsync(IpcRequest request)
     {
+        if (_client is null) return;
         await _client.SendAsync(request);
-        await RefreshAsync();
     }
 
+    /// <summary>
+    /// Fire-and-forget send for high-frequency operations (volume, mute, color).
+    /// The daemon will push a state-changed event.
+    /// </summary>
     private async Task SendQuietAsync(IpcRequest request)
     {
-        try { await _client.SendAsync(request); }
+        if (_client is null) return;
+        try { await _client.SendFireAndForgetAsync(request); }
         catch { /* fire-and-forget */ }
     }
 }
@@ -572,13 +731,14 @@ public class GroupColumnViewModel : ReactiveObject
     private string _colorHex;
     private IBrush _colorBrush;
     private CancellationTokenSource? _volumeDebounce;
+    private bool _muteSending;
 
     public Guid Id { get; }
     public string Name { get; }
     public string VolumeText => $"{_volume}%";
 
     /// <summary>Programs configured in this group (for disconnected indicators).</summary>
-    public IReadOnlyList<string> ConfiguredPrograms { get; }
+    public IReadOnlyList<string> ConfiguredPrograms { get; private set; }
 
     public string ColorHex
     {
@@ -622,6 +782,10 @@ public class GroupColumnViewModel : ReactiveObject
                 GroupId = Id,
                 Volume = volume
             });
+            // Clear the debounce token so UpdateFrom() knows the daemon now
+            // has the latest value and can resume syncing volume from it.
+            if (_volumeDebounce?.Token == ct)
+                _volumeDebounce = null;
         }
         catch (TaskCanceledException) { }
     }
@@ -633,11 +797,24 @@ public class GroupColumnViewModel : ReactiveObject
         {
             if (_muted == value) return;
             this.RaiseAndSetIfChanged(ref _muted, value);
-            _ = _sendQuiet(new IpcRequest
+            _ = SendMuteAsync(value);
+        }
+    }
+
+    private async Task SendMuteAsync(bool muted)
+    {
+        _muteSending = true;
+        try
+        {
+            await _sendQuiet(new IpcRequest
             {
-                Command = value ? "mute-group" : "unmute-group",
+                Command = muted ? "mute-group" : "unmute-group",
                 GroupId = Id
             });
+        }
+        finally
+        {
+            _muteSending = false;
         }
     }
 
@@ -703,6 +880,54 @@ public class GroupColumnViewModel : ReactiveObject
                 Color = color
             });
         });
+    }
+
+    /// <summary>
+    /// Updates mutable properties from a freshly created instance. Used by
+    /// the collection reconciler to patch in place without destroying the VM
+    /// (preserving debounce timers, slider drag state, etc.).
+    ///
+    /// Only updates properties that differ from the current values. Volume
+    /// and Muted are set via backing fields to avoid triggering IPC commands
+    /// (the daemon already has the authoritative values).
+    ///
+    /// Volume is skipped when a debounce is pending (the user's local value
+    /// is authoritative until the debounced IPC send completes). Muted is
+    /// skipped while a mute command is in-flight.
+    /// </summary>
+    public void UpdateFrom(GroupColumnViewModel source)
+    {
+        ConfiguredPrograms = source.ConfiguredPrograms;
+
+        // Skip volume sync while a debounce is pending — the user's slider
+        // position is authoritative until the debounced send completes and
+        // the daemon acknowledges the new value.
+        var debounceActive = _volumeDebounce is not null && !_volumeDebounce.IsCancellationRequested;
+        if (!debounceActive && _volume != source._volume)
+        {
+            _volume = source._volume;
+            this.RaisePropertyChanged(nameof(Volume));
+            this.RaisePropertyChanged(nameof(VolumeText));
+        }
+
+        // Skip muted sync while a mute/unmute command is in-flight.
+        if (!_muteSending && _muted != source._muted)
+        {
+            _muted = source._muted;
+            this.RaisePropertyChanged(nameof(Muted));
+        }
+
+        if (_isDefault != source._isDefault)
+        {
+            _isDefault = source._isDefault;
+            this.RaisePropertyChanged(nameof(IsDefault));
+        }
+
+        if (_colorHex != source._colorHex)
+        {
+            ColorHex = source._colorHex;
+            ColorBrush = source._colorBrush;
+        }
     }
 }
 

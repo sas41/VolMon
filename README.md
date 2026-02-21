@@ -20,66 +20,102 @@ volumes natively through the system audio server.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md)
 
-## Quick Start
+## Install
 
-### 1. Build
+### Prerequisites
+
+- [.NET 10 SDK](https://dotnet.microsoft.com/download) or later
+- Linux: PulseAudio or PipeWire (with PulseAudio compatibility)
+- Optional: ImageMagick (only needed if regenerating icons from SVG)
+
+### Linux (recommended)
+
+The install script builds, publishes, and sets up everything:
 
 ```bash
+./install/install.sh
+```
+
+This will:
+- Publish self-contained binaries for the daemon, GUI, and CLI
+- Install them to `~/.local/bin/` (`volmon-daemon`, `volmon-gui`, `volmon`)
+- Install and enable the systemd user service (auto-starts the daemon)
+- Install the desktop entry and icon for your app launcher
+
+After installation:
+
+```bash
+volmon-gui          # Launch the GUI
+volmon --help       # CLI usage
+systemctl --user status volmon   # Check daemon status
+```
+
+> **Note:** Make sure `~/.local/bin` is in your PATH. Most distributions
+> include it by default. If not, add `export PATH="$HOME/.local/bin:$PATH"`
+> to your shell profile.
+
+### Uninstall
+
+```bash
+./install/install.sh --uninstall
+```
+
+This stops the daemon, removes the systemd service, desktop entry, icon, and
+all installed binaries.
+
+### Development (run from source)
+
+```bash
+# Build all projects
 dotnet build
-```
 
-### 2. Start the daemon
-
-```bash
+# Start the daemon
 dotnet run --project src/VolMon.Daemon
+
+# In another terminal, start the GUI
+dotnet run --project src/VolMon.GUI
+
+# Or use VS Code — launch the "Daemon+GUI" compound configuration
 ```
 
-Or install as a systemd user service:
-
-```bash
-mkdir -p ~/.config/systemd/user
-cp install/volmon.service ~/.config/systemd/user/
-systemctl --user enable --now volmon
-```
-
-### 3. Use the CLI
+## CLI Usage
 
 ```bash
 # Check daemon status
-dotnet run --project src/VolMon.CLI -- status
+volmon status
 
 # Add a default group (catches all unmatched programs)
-dotnet run --project src/VolMon.CLI -- add-group Default --default
+volmon add-group Default --default
 
 # Add a group with volume
-dotnet run --project src/VolMon.CLI -- add-group Music 80
+volmon add-group Music 80
 
 # Add programs to the group
-dotnet run --project src/VolMon.CLI -- add-program Music spotify
-dotnet run --project src/VolMon.CLI -- add-program Music rhythmbox
+volmon add-program Music spotify
+volmon add-program Music rhythmbox
 
 # Add a device (e.g. microphone) to a group
-dotnet run --project src/VolMon.CLI -- add-device Comms alsa_input.pci-0000_00_1f.3.analog-stereo
+volmon add-device Comms alsa_input.pci-0000_00_1f.3.analog-stereo
 
 # List groups
-dotnet run --project src/VolMon.CLI -- groups
+volmon groups
 
 # List active streams and devices
-dotnet run --project src/VolMon.CLI -- streams
-dotnet run --project src/VolMon.CLI -- devices
+volmon streams
+volmon devices
 
 # Set volume
-dotnet run --project src/VolMon.CLI -- set-volume Music 50
+volmon set-volume Music 50
 
 # Mute/unmute
-dotnet run --project src/VolMon.CLI -- mute Music
-dotnet run --project src/VolMon.CLI -- unmute Music
+volmon mute Music
+volmon unmute Music
 ```
 
-### 4. Use the GUI
+## GUI
 
 ```bash
-dotnet run --project src/VolMon.GUI
+volmon-gui
 ```
 
 The GUI runs as a system tray icon. Click it to open the volume group editor.

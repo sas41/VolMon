@@ -22,6 +22,17 @@ public sealed class StreamWatcher : IDisposable
     public IReadOnlyDictionary<string, AudioStream> ActiveStreams => _activeStreams;
     public IReadOnlyDictionary<string, AudioDevice> KnownDevices => _knownDevices;
 
+    /// <summary>
+    /// Raised whenever the internal state changes (streams added/removed/changed,
+    /// devices changed). The daemon subscribes to this to broadcast updates to
+    /// connected IPC clients. Debounced to avoid event storms when multiple
+    /// streams change in rapid succession (e.g. applying volume to a group).
+    /// </summary>
+    public event EventHandler? StateChanged;
+
+    private CancellationTokenSource? _stateChangedDebounce;
+    private const int StateChangedDebounceMs = 100;
+
     public StreamWatcher(IAudioBackend backend, ConfigManager configManager, ILogger<StreamWatcher> logger)
     {
         _backend = backend;
@@ -85,7 +96,7 @@ public sealed class StreamWatcher : IDisposable
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to apply settings to stream {StreamId}", stream.Id);
+                _logger.LogDebug(ex, "Failed to apply settings to stream {StreamId} (transient; stream may still exist)", stream.Id);
             }
         }
 
@@ -143,6 +154,7 @@ public sealed class StreamWatcher : IDisposable
             _logger.LogInformation("New stream: {Stream}", stream);
 
             await ApplyStreamSettingsAsync(stream);
+            RaiseStateChanged();
         }
         catch (Exception ex)
         {
@@ -155,6 +167,7 @@ public sealed class StreamWatcher : IDisposable
         if (_activeStreams.Remove(e.StreamId))
         {
             _logger.LogInformation("Stream removed: {StreamId}", e.StreamId);
+            RaiseStateChanged();
         }
     }
 
@@ -171,6 +184,7 @@ public sealed class StreamWatcher : IDisposable
                 stream.AssignedGroup = existing.AssignedGroup;
 
             _activeStreams[e.StreamId] = stream;
+            RaiseStateChanged();
         }
         catch (Exception ex)
         {
@@ -193,6 +207,7 @@ public sealed class StreamWatcher : IDisposable
             }
 
             _logger.LogInformation("Device change detected, refreshed {Count} devices", devices.Count);
+            RaiseStateChanged();
         }
         catch (Exception ex)
         {
@@ -274,7 +289,10 @@ public sealed class StreamWatcher : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to apply settings to stream {StreamId}", stream.Id);
+            // Don't remove from _activeStreams here — a failed pactl call can be
+            // a transient PulseAudio/PipeWire hiccup, not proof the stream is gone.
+            // The authoritative removal signal is the 'remove' event from pactl subscribe.
+            _logger.LogDebug(ex, "Failed to apply settings to stream {StreamId} (transient; stream may still exist)", stream.Id);
         }
     }
 
@@ -299,8 +317,31 @@ public sealed class StreamWatcher : IDisposable
         }
     }
 
+    /// <summary>
+    /// Debounces rapid StateChanged notifications. Multiple calls within
+    /// <see cref="StateChangedDebounceMs"/> are coalesced into one.
+    /// </summary>
+    private void RaiseStateChanged()
+    {
+        _stateChangedDebounce?.Cancel();
+        _stateChangedDebounce = new CancellationTokenSource();
+        var ct = _stateChangedDebounce.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(StateChangedDebounceMs, ct);
+                StateChanged?.Invoke(this, EventArgs.Empty);
+            }
+            catch (OperationCanceledException) { }
+        });
+    }
+
     public void Dispose()
     {
+        _stateChangedDebounce?.Cancel();
+        _stateChangedDebounce?.Dispose();
         _backend.StreamCreated -= OnStreamCreated;
         _backend.StreamRemoved -= OnStreamRemoved;
         _backend.StreamChanged -= OnStreamChanged;

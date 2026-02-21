@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=VolMon
+Comment=Volume Monitoring and Control
+Exec=volmon-gui
+Icon=volmon
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Mixer;Settings;
+Keywords=volume;audio;mixer;sound;group;
+StartupNotify=true

@@ -7,10 +7,12 @@ if (args.Length == 0)
     return 1;
 }
 
-using var client = new IpcClient();
+await using var client = new IpcDuplexClient();
 
 try
 {
+    await client.ConnectAsync();
+
     var response = args[0] switch
     {
         "status" => await client.SendAsync(new IpcRequest { Command = "status" }),
@@ -177,7 +179,7 @@ static void PrintResponse(string command, IpcResponse response)
     }
 }
 
-static async Task<IpcResponse> HandleSetVolume(string[] args, IpcClient client)
+static async Task<IpcResponse> HandleSetVolume(string[] args, IpcDuplexClient client)
 {
     if (args.Length < 3)
         throw new ArgumentException("Usage: volmon set-volume <group> <0-100>");
@@ -193,7 +195,7 @@ static async Task<IpcResponse> HandleSetVolume(string[] args, IpcClient client)
     });
 }
 
-static async Task<IpcResponse> HandleMute(string[] args, IpcClient client, bool mute)
+static async Task<IpcResponse> HandleMute(string[] args, IpcDuplexClient client, bool mute)
 {
     if (args.Length < 2)
         throw new ArgumentException($"Usage: volmon {(mute ? "mute" : "unmute")} <group>");
@@ -205,7 +207,7 @@ static async Task<IpcResponse> HandleMute(string[] args, IpcClient client, bool 
     });
 }
 
-static async Task<IpcResponse> HandleAddGroup(string[] args, IpcClient client)
+static async Task<IpcResponse> HandleAddGroup(string[] args, IpcDuplexClient client)
 {
     if (args.Length < 2)
         throw new ArgumentException("Usage: volmon add-group <name> [volume] [--default]");
@@ -230,7 +232,7 @@ static async Task<IpcResponse> HandleAddGroup(string[] args, IpcClient client)
     });
 }
 
-static async Task<IpcResponse> HandleRemoveGroup(string[] args, IpcClient client)
+static async Task<IpcResponse> HandleRemoveGroup(string[] args, IpcDuplexClient client)
 {
     if (args.Length < 2)
         throw new ArgumentException("Usage: volmon remove-group <name>");
@@ -242,7 +244,7 @@ static async Task<IpcResponse> HandleRemoveGroup(string[] args, IpcClient client
     });
 }
 
-static async Task<IpcResponse> HandleAddProgram(string[] args, IpcClient client)
+static async Task<IpcResponse> HandleAddProgram(string[] args, IpcDuplexClient client)
 {
     if (args.Length < 3)
         throw new ArgumentException("Usage: volmon add-program <group> <binary-name>");
@@ -255,7 +257,7 @@ static async Task<IpcResponse> HandleAddProgram(string[] args, IpcClient client)
     });
 }
 
-static async Task<IpcResponse> HandleRemoveProgram(string[] args, IpcClient client)
+static async Task<IpcResponse> HandleRemoveProgram(string[] args, IpcDuplexClient client)
 {
     if (args.Length < 3)
         throw new ArgumentException("Usage: volmon remove-program <group> <binary-name>");
@@ -268,7 +270,7 @@ static async Task<IpcResponse> HandleRemoveProgram(string[] args, IpcClient clie
     });
 }
 
-static async Task<IpcResponse> HandleAddDevice(string[] args, IpcClient client)
+static async Task<IpcResponse> HandleAddDevice(string[] args, IpcDuplexClient client)
 {
     if (args.Length < 3)
         throw new ArgumentException("Usage: volmon add-device <group> <device-name>");
@@ -281,7 +283,7 @@ static async Task<IpcResponse> HandleAddDevice(string[] args, IpcClient client)
     });
 }
 
-static async Task<IpcResponse> HandleRemoveDevice(string[] args, IpcClient client)
+static async Task<IpcResponse> HandleRemoveDevice(string[] args, IpcDuplexClient client)
 {
     if (args.Length < 3)
         throw new ArgumentException("Usage: volmon remove-device <group> <device-name>");
@@ -294,7 +296,7 @@ static async Task<IpcResponse> HandleRemoveDevice(string[] args, IpcClient clien
     });
 }
 
-static async Task<IpcResponse> HandleSetDefault(string[] args, IpcClient client)
+static async Task<IpcResponse> HandleSetDefault(string[] args, IpcDuplexClient client)
 {
     if (args.Length < 2)
         throw new ArgumentException("Usage: volmon set-default <group-name>");

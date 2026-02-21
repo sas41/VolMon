@@ -131,17 +131,14 @@ public sealed class StreamWatcher : IDisposable
     {
         try
         {
-            // Small delay to let the stream fully initialize
-            await Task.Delay(200);
-
             var streams = await _backend.GetStreamsAsync();
             var stream = streams.FirstOrDefault(s => s.Id == e.StreamId);
             if (stream is null) return;
+            AssignStreamToGroup(stream);
 
             _activeStreams[stream.Id] = stream;
             _logger.LogInformation("New stream: {Stream}", stream);
 
-            AssignStreamToGroup(stream);
             await ApplyStreamSettingsAsync(stream);
         }
         catch (Exception ex)

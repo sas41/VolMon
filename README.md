@@ -1,8 +1,8 @@
 # VolMon
 
-A Linux-first utility for grouping applications by audio stream and controlling
-their volumes as a group. Works with PulseAudio and PipeWire (via its PulseAudio
-compatibility layer).
+A cross-platform utility for grouping applications by audio stream and
+controlling their volumes as a group. Works with PulseAudio/PipeWire on Linux,
+Core Audio (WASAPI) on Windows, and CoreAudio HAL on macOS.
 
 VolMon does **not** create virtual audio devices or channels. It sets per-stream
 volumes natively through the system audio server.
@@ -128,12 +128,24 @@ Config is stored at `~/.config/volmon/config.json`:
 
 ## Platform Support
 
-| Platform | Status |
-|---|---|
-| Linux (PulseAudio) | Working |
-| Linux (PipeWire) | Working (via PulseAudio compat) |
-| Windows | Stub (planned) |
-| macOS | Stub (low priority) |
+| Platform | Streams (per-app) | Devices | Monitoring |
+|---|---|---|---|
+| Linux (PulseAudio) | Full | Full | `pactl subscribe` |
+| Linux (PipeWire) | Full | Full | PulseAudio compat layer |
+| Windows (WASAPI) | Full | Full | COM callbacks |
+| macOS (CoreAudio) | Not available | Full | HAL property listeners |
+
+macOS does not expose per-application audio sessions via CoreAudio. Device-level
+volume and mute control works fully. Per-app control would require a virtual
+audio driver (e.g. BlackHole) which is out of scope.
+
+## Libraries
+
+| Library | Purpose | Platform |
+|---|---|---|
+| [Avalonia UI](https://github.com/AvaloniaUI/Avalonia) 11.2.7 | Cross-platform GUI framework | All |
+| [SharpHook](https://github.com/TolikPyl662/SharpHook) 7.1.1 | Global keyboard hooks for hotkeys | All |
+| [NAudio](https://github.com/naudio/NAudio) 2.2.1 | Windows Core Audio API (WASAPI) access | Windows |
 
 ## License
 

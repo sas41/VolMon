@@ -2,10 +2,10 @@
 
 ## System Overview
 
-VolMon is a Linux-first per-application volume grouping utility. It lets users
-organize audio streams (and hardware devices) into named groups, each with a
-shared volume and mute state. It does **not** create virtual audio devices — it
-controls volumes natively through the system audio server.
+VolMon is a cross-platform per-application volume grouping utility. It lets
+users organize audio streams (and hardware devices) into named groups, each with
+a shared volume and mute state. It does **not** create virtual audio devices —
+it controls volumes natively through the system audio server.
 
 The codebase is C# / .NET 10, split into four projects.
 
@@ -41,14 +41,14 @@ pipes.
 2. `EnsureIgnoredGroupExistsAsync()` creates the Ignored group if absent
    (`IsIgnored = true`, `Color = "#808080"`).
 3. The IPC server starts listening on named pipe `volmon-daemon`.
-4. `StreamWatcher` starts `pactl subscribe` as a long-lived child process.
+4. `StreamWatcher` starts the audio backend's monitoring loop.
 5. An initial scan (`GetStreamsAsync`, `GetDevicesAsync`) assigns existing
    streams to groups.
 
 ### Runtime Event Loop
 
 ```
-pactl subscribe  ──events──▸  PulseAudioBackend
+Platform audio events  ──▸  IAudioBackend implementation
                                   │
         C# events (StreamCreated/Removed/Changed, DeviceChanged)
                                   │
@@ -63,8 +63,9 @@ pactl subscribe  ──events──▸  PulseAudioBackend
                        └──────────────────────┘
 ```
 
-PulseAudio/PipeWire pushes events instantly via `pactl subscribe`. The daemon
-reacts synchronously to each event — there is no polling on the daemon side.
+Each backend pushes events as they occur (Linux via `pactl subscribe`, Windows
+via COM callbacks, macOS via CoreAudio property listeners). The daemon reacts to
+each event — there is no polling on the daemon side.
 
 ### IPC Request/Response
 
@@ -108,15 +109,18 @@ The central domain object. Each group has:
 
 ### AudioStream
 
-Represents one PulseAudio sink-input (one per-app audio stream). Multiple
-streams can exist for the same binary (e.g. Firefox creates one per tab).
+Represents one per-application audio stream. On Linux this is a PulseAudio
+sink-input; on Windows it is a WASAPI audio session; on macOS per-app streams
+are not available. Multiple streams can exist for the same binary (e.g. Firefox
+creates one per tab on Linux).
 
-Key fields: `Id` (PA index), `BinaryName`, `ProcessId`, `Volume`, `Muted`,
-`AssignedGroup` (Guid?).
+Key fields: `Id` (backend-specific — PA index on Linux, PID string on Windows),
+`BinaryName`, `ProcessId`, `Volume`, `Muted`, `AssignedGroup` (Guid?).
 
 ### AudioDevice
 
-Represents a hardware sink or source. Key fields: `Name` (stable PA name),
+Represents a hardware sink or source. Key fields: `Name` (stable identifier —
+PA sink/source name on Linux, device ID on Windows, device UID on macOS),
 `Type` (Sink/Source), `Volume`, `Muted`, `AssignedGroup` (Guid?).
 
 Devices are **never** auto-assigned. They must be explicitly added to a group
@@ -134,10 +138,13 @@ All platform-specific audio code is behind `IAudioBackend`:
 - **Monitoring:** `StartMonitoringAsync()`, `StopMonitoringAsync()`
 - **Events:** `StreamCreated`, `StreamRemoved`, `StreamChanged`, `DeviceChanged`
 
+The daemon selects the backend at startup based on the OS
+(`PlatformOverlayFactory`-style detection in `Program.cs`).
+
 ### PulseAudioBackend (Linux)
 
-The only production backend. Works with both PulseAudio and PipeWire (via its
-PulseAudio compatibility layer).
+Works with both PulseAudio and PipeWire (via its PulseAudio compatibility
+layer). No native library bindings — spawns CLI processes and parses output.
 
 **How it works:**
 - Spawns `pactl list sink-inputs`, `pactl list sinks`, `pactl list sources` as
@@ -156,10 +163,77 @@ PulseAudio compatibility layer).
 This chain handles cases where PulseAudio's metadata is incorrect or missing
 (e.g. sandboxed apps, Flatpak, Electron wrappers).
 
-### Stubs
+### WindowsAudioBackend (Windows)
 
-`WindowsAudioBackend` and `MacOsAudioBackend` exist as placeholders. They
-throw `NotSupportedException` for all operations.
+Uses [NAudio](https://github.com/naudio/NAudio) (`NAudio.CoreAudioApi` namespace)
+to access the Windows Core Audio API (WASAPI). Supports full per-application
+session control and device management.
+
+**Threading:** All COM objects live on a dedicated STA thread
+(`VolMon-CoreAudio-STA`) with a `BlockingTaskQueue` message pump. Public methods
+marshal work to this thread via `RunOnStaAsync()`, returning `Task`/`Task<T>`.
+This is required because Windows Core Audio COM interfaces are
+apartment-threaded.
+
+**Per-app sessions:**
+- Enumerates `AudioSessionManager.Sessions` on all active render devices.
+- Each session is identified by its process ID (PID). The stream ID is the PID
+  string — Windows audio sessions are typically 1:1 with processes.
+- Volume is mapped between NAudio's 0.0–1.0 float range and VolMon's 0–100 int.
+- Process name resolved via `Process.GetProcessById(pid).ProcessName`.
+- System-sounds sessions (PID 0) are filtered out.
+
+**Devices:**
+- Enumerates both `Render` (Sink) and `Capture` (Source) endpoints via
+  `MMDeviceEnumerator.EnumerateAudioEndPoints()`.
+- Device `Name` = Windows device ID (stable across reboots). `Description` =
+  friendly name (e.g. "Speakers (Realtek Audio)").
+- Volume via `AudioEndpointVolume.MasterVolumeLevelScalar`.
+
+**Monitoring:**
+- New sessions detected via `AudioSessionManager.OnSessionCreated`. Each new
+  session gets a `SessionEventClient` registered for disconnect/expire tracking.
+- `StreamRemoved` fired when `OnSessionDisconnected` or
+  `OnStateChanged(Expired)` fires on a session.
+- Device add/remove/state-change via `IMMNotificationClient` registered on the
+  `MMDeviceEnumerator`.
+
+**Limitation:** True exclusive fullscreen (DirectX/Vulkan exclusive mode)
+bypasses the Windows compositor entirely. Per-app volume control still works,
+but the overlay cannot render above exclusive fullscreen.
+
+### MacOsAudioBackend (macOS)
+
+Uses the CoreAudio HAL (Hardware Abstraction Layer) via direct P/Invoke to
+`CoreAudio.framework` and `CoreFoundation.framework`. No external NuGet
+dependencies.
+
+**Device-only — per-app streams are NOT supported.** macOS CoreAudio does not
+expose per-application audio sessions. Per-app volume control on macOS would
+require a virtual audio driver (e.g. BlackHole, Loopback) or a privileged audio
+plugin, which is out of scope. Stream methods return empty lists / no-op.
+
+**Devices:**
+- Enumerates all devices via `AudioObjectGetPropertyData` on
+  `kAudioObjectSystemObject` with `kAudioHardwarePropertyDevices`.
+- Determines Sink vs Source by checking `kAudioDevicePropertyStreams` per scope
+  (`kAudioObjectPropertyScopeOutput` / `kAudioObjectPropertyScopeInput`).
+- Device `Name` = `kAudioDevicePropertyDeviceUID` (stable across reboots).
+  `Description` = `kAudioObjectPropertyName` (human-readable).
+
+**Volume control:** Uses the **virtual master volume** selector (`'vmvc'` /
+`0x766D7663`). This is a system-synthesized control that manipulates per-channel
+volumes while preserving stereo balance. Falls back to per-channel
+`kAudioDevicePropertyVolumeScalar` on channels 1–2 if the virtual master is
+unavailable.
+
+**Mute:** Uses `kAudioDevicePropertyMute` on element 0 (master).
+
+**Monitoring:**
+- Device list changes via `AudioObjectAddPropertyListener` on the system object.
+- Per-device volume/mute listeners on both output and input scopes.
+- CFString conversion uses a safe managed implementation with `CFStringGetLength`
+  / `CFStringGetCharacters` and `Marshal.Copy` (no unsafe code).
 
 ## IPC Protocol
 
@@ -319,8 +393,7 @@ user's PulseAudio/PipeWire session.
 
 ## Future Work
 
-- Windows audio backend (Core Audio / NAudio)
-- macOS audio backend (CoreAudio CLI)
 - Diff-based ObservableCollection merging (instead of Clear+Rebuild) to eliminate potential UI flicker
 - Drag visual feedback and drop target highlighting
 - Per-stream volume overrides within a group
+- macOS per-app audio control via virtual audio driver integration

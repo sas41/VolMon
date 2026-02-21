@@ -4,7 +4,9 @@ using System.Reactive.Linq;
 using Avalonia.Media;
 using ReactiveUI;
 using VolMon.Core.Audio;
+using VolMon.Core.Config;
 using VolMon.Core.Ipc;
+using VolMon.GUI.Services;
 
 namespace VolMon.GUI.ViewModels;
 
@@ -22,10 +24,14 @@ public class MainViewModel : ReactiveObject
     private DaemonStatus? _lastStatus;
     private bool _isRefreshing;
 
+    // ── Shortcut target state ────────────────────────────────────────
+    private Guid? _targetGroupId;
+
     private string _daemonStatusText = "Checking...";
     private IBrush _daemonStatusColor = Brushes.Gray;
     private string _statusSummary = "";
     private string _newGroupName = "";
+    private bool _showSettings;
 
     public string DaemonStatusText
     {
@@ -51,6 +57,16 @@ public class MainViewModel : ReactiveObject
         set => this.RaiseAndSetIfChanged(ref _newGroupName, value);
     }
 
+    public bool ShowSettings
+    {
+        get => _showSettings;
+        set => this.RaiseAndSetIfChanged(ref _showSettings, value);
+    }
+
+    public ObservableCollection<ShortcutBindingViewModel> ShortcutBindings { get; } = [];
+
+    public ReactiveCommand<Unit, Unit> ToggleSettingsCommand { get; }
+
     public ObservableCollection<GroupColumnViewModel> Groups { get; } = [];
     public ObservableCollection<PoolItemViewModel> UnassignedInputs { get; } = [];
     public ObservableCollection<PoolItemViewModel> UnassignedOutputs { get; } = [];
@@ -64,6 +80,12 @@ public class MainViewModel : ReactiveObject
             .Select(name => !string.IsNullOrWhiteSpace(name));
         AddGroupCommand = ReactiveCommand.CreateFromTask(AddGroupAsync, canAddGroup);
 
+        ToggleSettingsCommand = ReactiveCommand.Create(() =>
+        {
+            ShowSettings = !ShowSettings;
+        });
+
+        _ = LoadShortcutBindingsAsync();
         _ = RefreshAsync();
     }
 
@@ -294,6 +316,66 @@ public class MainViewModel : ReactiveObject
         await RefreshAsync();
     }
 
+    // ── Shortcut settings ───────────────────────────────────────────
+
+    private async Task LoadShortcutBindingsAsync()
+    {
+        var configManager = new ConfigManager();
+        try { await configManager.LoadAsync(); }
+        catch { /* defaults */ }
+
+        var sc = configManager.Config.Shortcuts;
+        ShortcutBindings.Clear();
+        ShortcutBindings.Add(new ShortcutBindingViewModel("Volume Up", nameof(sc.VolumeUp), sc.VolumeUp));
+        ShortcutBindings.Add(new ShortcutBindingViewModel("Volume Down", nameof(sc.VolumeDown), sc.VolumeDown));
+        ShortcutBindings.Add(new ShortcutBindingViewModel("Next Group", nameof(sc.SelectNextGroup), sc.SelectNextGroup));
+        ShortcutBindings.Add(new ShortcutBindingViewModel("Previous Group", nameof(sc.SelectPreviousGroup), sc.SelectPreviousGroup));
+        ShortcutBindings.Add(new ShortcutBindingViewModel("Mute Toggle", nameof(sc.MuteToggle), sc.MuteToggle));
+    }
+
+    /// <summary>
+    /// Saves current shortcut bindings to config and reconfigures the hotkey service.
+    /// </summary>
+    public async Task SaveShortcutsAsync()
+    {
+        var configManager = new ConfigManager();
+        try { await configManager.LoadAsync(); }
+        catch { /* defaults */ }
+
+        var sc = configManager.Config.Shortcuts;
+        foreach (var binding in ShortcutBindings)
+        {
+            switch (binding.ConfigProperty)
+            {
+                case nameof(sc.VolumeUp): sc.VolumeUp = binding.KeyCode; break;
+                case nameof(sc.VolumeDown): sc.VolumeDown = binding.KeyCode; break;
+                case nameof(sc.SelectNextGroup): sc.SelectNextGroup = binding.KeyCode; break;
+                case nameof(sc.SelectPreviousGroup): sc.SelectPreviousGroup = binding.KeyCode; break;
+                case nameof(sc.MuteToggle): sc.MuteToggle = binding.KeyCode; break;
+            }
+        }
+
+        try { await configManager.SaveAsync(); }
+        catch { /* best-effort */ }
+
+        // Notify App to reconfigure the hotkey service
+        ShortcutsChanged?.Invoke(sc);
+    }
+
+    /// <summary>
+    /// Raised when shortcuts are saved, so App.axaml.cs can reconfigure the hotkey service.
+    /// </summary>
+    public event Action<ShortcutConfig>? ShortcutsChanged;
+
+    /// <summary>
+    /// Removes the key binding for a shortcut (sets it to empty).
+    /// </summary>
+    public async Task ClearShortcutAsync(ShortcutBindingViewModel binding)
+    {
+        binding.KeyCode = "";
+        await SaveShortcutsAsync();
+    }
+
     // ── Drag-drop ────────────────────────────────────────────────────
 
     public async Task AssignToGroupAsync(Guid groupId, string itemType, string id)
@@ -359,6 +441,106 @@ public class MainViewModel : ReactiveObject
             });
         }
         catch { /* best-effort */ }
+    }
+
+    // ── Hotkey actions ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Raised when a hotkey action changes the targeted group or its volume.
+    /// Carries (groupName, volume, muted, colorHex) for the overlay.
+    /// </summary>
+    public event Action<string, int, bool, string>? OverlayRequested;
+
+    /// <summary>
+    /// Handles a global hotkey action. Called from the UI thread.
+    /// </summary>
+    public async Task HandleHotkeyAsync(HotkeyAction action)
+    {
+        if (Groups.Count == 0) return;
+
+        if (action == HotkeyAction.SelectNextGroup)
+        {
+            SelectNextGroup();
+            var g = GetTargetGroup();
+            if (g is not null)
+                OverlayRequested?.Invoke(g.Name, g.Volume, g.Muted, g.ColorHex);
+            return;
+        }
+
+        if (action == HotkeyAction.SelectPreviousGroup)
+        {
+            SelectPreviousGroup();
+            var g = GetTargetGroup();
+            if (g is not null)
+                OverlayRequested?.Invoke(g.Name, g.Volume, g.Muted, g.ColorHex);
+            return;
+        }
+
+        // Ensure we have a target
+        EnsureTarget();
+        var target = GetTargetGroup();
+        if (target is null) return;
+
+        if (action == HotkeyAction.MuteToggle)
+        {
+            // Toggle mute (the setter fires the IPC command)
+            target.Muted = !target.Muted;
+            OverlayRequested?.Invoke(target.Name, target.Volume, target.Muted, target.ColorHex);
+            return;
+        }
+
+        int delta = action == HotkeyAction.VolumeUp ? 5 : -5;
+        int newVolume = Math.Clamp(target.Volume + delta, 0, 100);
+
+        // Update locally (triggers the debounced IPC send via the setter)
+        target.Volume = newVolume;
+
+        OverlayRequested?.Invoke(target.Name, newVolume, target.Muted, target.ColorHex);
+    }
+
+    private void SelectNextGroup()
+    {
+        if (Groups.Count == 0) return;
+
+        var currentIndex = GetTargetIndex();
+        var nextIndex = (currentIndex + 1) % Groups.Count;
+        _targetGroupId = Groups[nextIndex].Id;
+    }
+
+    private void SelectPreviousGroup()
+    {
+        if (Groups.Count == 0) return;
+
+        var currentIndex = GetTargetIndex();
+        var prevIndex = currentIndex <= 0 ? Groups.Count - 1 : currentIndex - 1;
+        _targetGroupId = Groups[prevIndex].Id;
+    }
+
+    private void EnsureTarget()
+    {
+        if (_targetGroupId.HasValue && Groups.Any(g => g.Id == _targetGroupId.Value))
+            return;
+
+        // Default to first group
+        if (Groups.Count > 0)
+            _targetGroupId = Groups[0].Id;
+    }
+
+    private GroupColumnViewModel? GetTargetGroup()
+    {
+        if (!_targetGroupId.HasValue) return null;
+        return Groups.FirstOrDefault(g => g.Id == _targetGroupId.Value);
+    }
+
+    private int GetTargetIndex()
+    {
+        if (!_targetGroupId.HasValue) return -1;
+        for (int i = 0; i < Groups.Count; i++)
+        {
+            if (Groups[i].Id == _targetGroupId.Value)
+                return i;
+        }
+        return -1;
     }
 
     // ── IPC helpers ──────────────────────────────────────────────────
@@ -576,5 +758,83 @@ public class PoolItemViewModel
         DisplayName = displayName;
         ItemType = itemType;
         Identifier = identifier;
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// ShortcutBindingViewModel
+// ═════════════════════════════════════════════════════════════════════
+
+/// <summary>
+/// Represents a single configurable shortcut binding in the settings panel.
+/// </summary>
+public class ShortcutBindingViewModel : ReactiveObject
+{
+    private string _keyDisplay;
+    private string _keyCode;
+    private bool _isListening;
+
+    /// <summary>Human-readable action label (e.g. "Volume Up").</summary>
+    public string Label { get; }
+
+    /// <summary>Property name on ShortcutConfig (e.g. "VolumeUp").</summary>
+    public string ConfigProperty { get; }
+
+    /// <summary>Display text for the currently bound key.</summary>
+    public string KeyDisplay
+    {
+        get => _keyDisplay;
+        set => this.RaiseAndSetIfChanged(ref _keyDisplay, value);
+    }
+
+    /// <summary>The raw key code string stored in config.</summary>
+    public string KeyCode
+    {
+        get => _keyCode;
+        set
+        {
+            this.RaiseAndSetIfChanged(ref _keyCode, value);
+            KeyDisplay = FormatKey(value);
+        }
+    }
+
+    /// <summary>Whether this binding is currently waiting for a key press.</summary>
+    public bool IsListening
+    {
+        get => _isListening;
+        set => this.RaiseAndSetIfChanged(ref _isListening, value);
+    }
+
+    public string ButtonText => IsListening ? "..." : KeyDisplay;
+
+    public ShortcutBindingViewModel(string label, string configProperty, string keyCode)
+    {
+        Label = label;
+        ConfigProperty = configProperty;
+        _keyCode = keyCode;
+        _keyDisplay = FormatKey(keyCode);
+    }
+
+    /// <summary>
+    /// Formats a key combo string for display.
+    /// Input: "Ctrl+Shift+F1" or "F13" or "Ctrl+A"
+    /// Output: "Ctrl + Shift + F1" or "F13" or "Ctrl + A"
+    /// Strips "Vc" prefix from the key part if present.
+    /// </summary>
+    public static string FormatKey(string keyCode)
+    {
+        if (string.IsNullOrEmpty(keyCode)) return "(None)";
+
+        var parts = keyCode.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) return "(None)";
+
+        // Format each part: modifiers stay as-is, key part strips "Vc" prefix
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (parts[i].StartsWith("Vc", StringComparison.OrdinalIgnoreCase))
+                parts[i] = parts[i][2..];
+        }
+
+        return string.Join(" + ", parts);
     }
 }

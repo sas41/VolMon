@@ -15,6 +15,7 @@ public partial class MainWindow : Window
 {
     private MainViewModel? _viewModel;
     private DispatcherTimer? _pollTimer;
+    private ShortcutBindingViewModel? _listeningBinding;
 
     public MainWindow()
     {
@@ -25,6 +26,7 @@ public partial class MainWindow : Window
         AddHandler(DragDrop.DropEvent, OnDrop);
         AddHandler(DragDrop.DragOverEvent, OnDragOver);
         AddHandler(PointerPressedEvent, OnItemPointerPressed, RoutingStrategies.Tunnel);
+        AddHandler(Button.ClickEvent, OnButtonClick, RoutingStrategies.Bubble);
     }
 
     // ── Auto-refresh timer ───────────────────────────────────────────
@@ -353,6 +355,164 @@ public partial class MainWindow : Window
             textBox.SelectAll();
         }, TimeSpan.FromMilliseconds(50));
     }
+
+    // ── Shortcut button routing ─────────────────────────────────────
+
+    private void OnButtonClick(object? sender, RoutedEventArgs e)
+    {
+        if (e.Source is not Button btn) return;
+
+        if (btn.Classes.Contains("shortcutKey") && btn.Tag is ShortcutBindingViewModel keyBinding)
+        {
+            OnShortcutKeyClick(keyBinding);
+            e.Handled = true;
+        }
+        else if (btn.Classes.Contains("shortcutClear") && btn.Tag is ShortcutBindingViewModel clearBinding)
+        {
+            OnShortcutClearClick(clearBinding);
+            e.Handled = true;
+        }
+    }
+
+    // ── Shortcut key capture ────────────────────────────────────────
+
+    private void OnShortcutKeyClick(ShortcutBindingViewModel binding)
+    {
+        // Cancel any previous listening and restore its display
+        if (_listeningBinding is not null)
+        {
+            _listeningBinding.IsListening = false;
+            // Restore display from the stored key code
+            _listeningBinding.KeyDisplay = ShortcutBindingViewModel.FormatKey(_listeningBinding.KeyCode);
+        }
+
+        binding.IsListening = true;
+        binding.KeyDisplay = "Press a key...";
+        _listeningBinding = binding;
+    }
+
+    private async void OnShortcutClearClick(ShortcutBindingViewModel binding)
+    {
+        // Cancel listening if active
+        if (_listeningBinding is not null)
+        {
+            _listeningBinding.IsListening = false;
+            _listeningBinding.KeyDisplay = ShortcutBindingViewModel.FormatKey(_listeningBinding.KeyCode);
+            _listeningBinding = null;
+        }
+
+        if (_viewModel is not null)
+            await _viewModel.ClearShortcutAsync(binding);
+    }
+
+    protected override async void OnKeyDown(KeyEventArgs e)
+    {
+        if (_listeningBinding is not null)
+        {
+            // Map Avalonia Key to a SharpHook-compatible key code name
+            var keyName = MapAvaloniaKeyToSharpHook(e.Key);
+            if (keyName is not null)
+            {
+                // Build combo string with modifiers: "Ctrl+Shift+F1"
+                var combo = BuildComboString(e.KeyModifiers, keyName);
+                _listeningBinding.KeyCode = combo; // setter updates KeyDisplay
+                _listeningBinding.IsListening = false;
+                _listeningBinding = null;
+
+                if (_viewModel is not null)
+                    await _viewModel.SaveShortcutsAsync();
+            }
+
+            e.Handled = true;
+            return;
+        }
+
+        base.OnKeyDown(e);
+    }
+
+    /// <summary>
+    /// Builds a combo string like "Ctrl+Shift+F1" from Avalonia key modifiers and a key name.
+    /// Modifier order: Ctrl, Alt, Shift, Meta.
+    /// </summary>
+    private static string BuildComboString(KeyModifiers modifiers, string keyName)
+    {
+        var parts = new List<string>(4);
+
+        if (modifiers.HasFlag(KeyModifiers.Control))
+            parts.Add("Ctrl");
+        if (modifiers.HasFlag(KeyModifiers.Alt))
+            parts.Add("Alt");
+        if (modifiers.HasFlag(KeyModifiers.Shift))
+            parts.Add("Shift");
+        if (modifiers.HasFlag(KeyModifiers.Meta))
+            parts.Add("Meta");
+
+        parts.Add(keyName);
+        return string.Join("+", parts);
+    }
+
+    /// <summary>
+    /// Maps an Avalonia Key enum to a SharpHook KeyCode name string.
+    /// Returns null for modifier-only keys and unsupported keys.
+    /// </summary>
+    private static string? MapAvaloniaKeyToSharpHook(Key key) => key switch
+    {
+        // Function keys
+        Key.F1 => "F1", Key.F2 => "F2", Key.F3 => "F3", Key.F4 => "F4",
+        Key.F5 => "F5", Key.F6 => "F6", Key.F7 => "F7", Key.F8 => "F8",
+        Key.F9 => "F9", Key.F10 => "F10", Key.F11 => "F11", Key.F12 => "F12",
+        Key.F13 => "F13", Key.F14 => "F14", Key.F15 => "F15",
+        Key.F16 => "F16", Key.F17 => "F17", Key.F18 => "F18",
+        Key.F19 => "F19", Key.F20 => "F20", Key.F21 => "F21",
+        Key.F22 => "F22", Key.F23 => "F23", Key.F24 => "F24",
+
+        // Letters
+        Key.A => "A", Key.B => "B", Key.C => "C", Key.D => "D",
+        Key.E => "E", Key.F => "F", Key.G => "G", Key.H => "H",
+        Key.I => "I", Key.J => "J", Key.K => "K", Key.L => "L",
+        Key.M => "M", Key.N => "N", Key.O => "O", Key.P => "P",
+        Key.Q => "Q", Key.R => "R", Key.S => "S", Key.T => "T",
+        Key.U => "U", Key.V => "V", Key.W => "W", Key.X => "X",
+        Key.Y => "Y", Key.Z => "Z",
+
+        // Numbers
+        Key.D0 => "0", Key.D1 => "1", Key.D2 => "2", Key.D3 => "3",
+        Key.D4 => "4", Key.D5 => "5", Key.D6 => "6", Key.D7 => "7",
+        Key.D8 => "8", Key.D9 => "9",
+
+        // Numpad
+        Key.NumPad0 => "NumPad0", Key.NumPad1 => "NumPad1",
+        Key.NumPad2 => "NumPad2", Key.NumPad3 => "NumPad3",
+        Key.NumPad4 => "NumPad4", Key.NumPad5 => "NumPad5",
+        Key.NumPad6 => "NumPad6", Key.NumPad7 => "NumPad7",
+        Key.NumPad8 => "NumPad8", Key.NumPad9 => "NumPad9",
+
+        // Navigation
+        Key.Up => "Up", Key.Down => "Down", Key.Left => "Left", Key.Right => "Right",
+        Key.Home => "Home", Key.End => "End",
+        Key.PageUp => "PageUp", Key.PageDown => "PageDown",
+        Key.Insert => "Insert", Key.Delete => "Delete",
+
+        // Common keys
+        Key.Space => "Space", Key.Enter => "Enter", Key.Tab => "Tab",
+        Key.Back => "Backspace", Key.Escape => "Escape",
+        Key.Pause => "Pause", Key.Scroll => "ScrollLock",
+        Key.PrintScreen => "PrintScreen",
+
+        // Punctuation/symbols
+        Key.OemMinus => "Minus", Key.OemPlus => "Equals",
+        Key.OemOpenBrackets => "OpenBracket", Key.OemCloseBrackets => "CloseBracket",
+        Key.OemBackslash => "BackSlash", Key.OemSemicolon => "Semicolon",
+        Key.OemQuotes => "Quote", Key.OemComma => "Comma",
+        Key.OemPeriod => "Period", Key.OemQuestion => "Slash",
+        Key.OemTilde => "BackQuote",
+
+        // Modifier-only keys — skip these
+        Key.LeftShift or Key.RightShift or Key.LeftCtrl or Key.RightCtrl
+            or Key.LeftAlt or Key.RightAlt or Key.LWin or Key.RWin => null,
+
+        _ => null,
+    };
 
     // ── Helpers ──────────────────────────────────────────────────────
 

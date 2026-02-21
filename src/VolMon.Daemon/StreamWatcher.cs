@@ -72,8 +72,9 @@ public sealed class StreamWatcher : IDisposable
             return;
         }
 
-        // Apply to streams
-        foreach (var stream in _activeStreams.Values.Where(s => s.AssignedGroup == group.Id))
+        // Snapshot to avoid "collection was modified" if pactl events fire concurrently
+        var streams = _activeStreams.Values.Where(s => s.AssignedGroup == group.Id).ToList();
+        foreach (var stream in streams)
         {
             try
             {
@@ -88,8 +89,9 @@ public sealed class StreamWatcher : IDisposable
             }
         }
 
-        // Apply to devices
-        foreach (var device in _knownDevices.Values.Where(d => d.AssignedGroup == group.Id))
+        // Snapshot to avoid "collection was modified" if pactl events fire concurrently
+        var devices = _knownDevices.Values.Where(d => d.AssignedGroup == group.Id).ToList();
+        foreach (var device in devices)
         {
             try
             {
@@ -110,14 +112,15 @@ public sealed class StreamWatcher : IDisposable
     /// </summary>
     public async Task ReassignAllAsync(CancellationToken ct = default)
     {
-        foreach (var stream in _activeStreams.Values)
+        // Snapshot to avoid "collection was modified" if pactl events fire concurrently
+        foreach (var stream in _activeStreams.Values.ToList())
         {
             stream.AssignedGroup = null;
             AssignStreamToGroup(stream);
             await ApplyStreamSettingsAsync(stream, ct);
         }
 
-        foreach (var device in _knownDevices.Values)
+        foreach (var device in _knownDevices.Values.ToList())
         {
             device.AssignedGroup = null;
             AssignDeviceToGroup(device);

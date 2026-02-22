@@ -1,3 +1,5 @@
+using System.IO.Pipes;
+using System.Net.Sockets;
 using VolMon.Core.Audio;
 using VolMon.Core.Config;
 using VolMon.Core.Ipc;
@@ -56,6 +58,9 @@ public sealed class DaemonService : BackgroundService
 
         // Initial scan
         await _watcher.InitialScanAsync(stoppingToken);
+
+        // Check for stale pipe / existing daemon before starting the IPC server.
+        await CleanStalePipeAsync(stoppingToken);
 
         // Start IPC server
         _ipcServer = new IpcDuplexServer(HandleIpcRequestAsync);
@@ -620,4 +625,69 @@ public sealed class DaemonService : BackgroundService
     private AudioGroup? FindGroupByName(string name) =>
         _configManager.Config.Groups.FirstOrDefault(
             g => g.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+
+    // ── Stale pipe detection ────────────────────────────────────────
+
+    /// <summary>
+    /// On Linux, .NET named pipes are Unix domain sockets at /tmp/CoreFxPipe_{name}.
+    /// If a previous daemon crashed or was killed without cleanup, the socket file
+    /// remains and prevents a new server from binding.
+    ///
+    /// This method detects that situation by attempting a quick client connect:
+    ///   - If it succeeds → another daemon is already running (fatal error).
+    ///   - If it fails    → stale socket, delete it and proceed.
+    /// </summary>
+    private async Task CleanStalePipeAsync(CancellationToken ct)
+    {
+        // On Linux the socket path is /tmp/CoreFxPipe_{pipeName}.
+        // On Windows named pipes don't leave files, so this is a no-op.
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+            return;
+
+        var socketPath = Path.Combine(Path.GetTempPath(), $"CoreFxPipe_{IpcConstants.PipeName}");
+        if (!File.Exists(socketPath))
+            return;
+
+        _logger.LogWarning(
+            "Pipe socket already exists at {Path} — checking for a running daemon...",
+            socketPath);
+
+        // Try connecting as a client with a short timeout.
+        try
+        {
+            using var probe = new NamedPipeClientStream(".", IpcConstants.PipeName, PipeDirection.InOut);
+            await probe.ConnectAsync(TimeSpan.FromMilliseconds(500), ct);
+
+            // Connected — another daemon is alive.
+            _logger.LogCritical(
+                "Another VolMon daemon is already running (pipe '{Pipe}' is active). "
+                + "Kill the other instance first, or delete {Path}.",
+                IpcConstants.PipeName, socketPath);
+
+            throw new InvalidOperationException(
+                $"Another VolMon daemon is already running on pipe '{IpcConstants.PipeName}'.");
+        }
+        catch (TimeoutException)
+        {
+            // Nobody answered — stale socket from a crashed process.
+            _logger.LogWarning("Stale pipe socket detected — removing {Path}", socketPath);
+            try { File.Delete(socketPath); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to remove stale pipe socket {Path}", socketPath);
+                throw;
+            }
+        }
+        catch (IOException)
+        {
+            // Connection refused / broken pipe — also stale.
+            _logger.LogWarning("Stale pipe socket detected — removing {Path}", socketPath);
+            try { File.Delete(socketPath); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to remove stale pipe socket {Path}", socketPath);
+                throw;
+            }
+        }
+    }
 }

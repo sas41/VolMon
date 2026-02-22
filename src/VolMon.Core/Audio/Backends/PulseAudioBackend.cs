@@ -5,32 +5,48 @@ namespace VolMon.Core.Audio.Backends;
 
 /// <summary>
 /// Linux audio backend using libpulse P/Invoke (works with both PulseAudio and PipeWire).
-/// Maintains a persistent connection via <c>pa_threaded_mainloop</c> and communicates over
-/// PulseAudio's native Unix-socket protocol — no process spawning or text parsing.
+/// Maintains a persistent connection via <c>pa_mainloop</c> (non-threaded) driven by a
+/// managed background thread, and communicates over PulseAudio's native Unix-socket
+/// protocol — no process spawning or text parsing.
 /// </summary>
 /// <remarks>
 /// Threading model:
 /// <list type="bullet">
-///   <item><c>pa_threaded_mainloop</c> runs its own background thread that drives all PA I/O.</item>
-///   <item>All PA API calls from external threads must be wrapped in lock/unlock.</item>
-///   <item>Callbacks from PA fire on the mainloop thread <b>with the lock already held</b> —
-///         they must never call lock() again (assertion failure) and must not block.</item>
-///   <item>Query methods (Get*Async) use the lock → issue op → wait → signal → unlock pattern
-///         so the result is ready when the method returns.</item>
-///   <item>Subscription callbacks dispatch events to the thread pool to avoid re-entrant
-///         deadlocks when event handlers call back into the backend.</item>
+///   <item>A managed <see cref="Thread"/> pumps the <c>pa_mainloop</c> event loop.
+///         Using a managed thread instead of <c>pa_threaded_mainloop</c> avoids native
+///         thread creation that confuses the vsdbg debugger (which tracks native
+///         clone/fork calls via ptrace and may lose the process).</item>
+///   <item>All PA API calls from external threads must be wrapped in
+///         <c>PaLock()</c> / <c>PaUnlock()</c>. <c>PaLock</c> acquires the monitor
+///         and wakes the mainloop so it releases the lock.</item>
+///   <item>The mainloop thread holds the same monitor while inside
+///         <c>pa_mainloop_iterate</c>. After iterate returns, it calls
+///         <c>Monitor.PulseAll</c> to wake any <c>PaWait</c> callers, then
+///         releases the monitor briefly so external callers can acquire it.</item>
+///   <item>Callbacks from PA fire on the mainloop thread <b>inside the lock</b> —
+///         they must never call <c>PaLock</c> and must not block.</item>
+///   <item>Subscription callbacks dispatch events to the thread pool to avoid
+///         re-entrant deadlocks when event handlers call back into the backend.</item>
 /// </list>
 /// </remarks>
 public sealed class PulseAudioBackend : IAudioBackend
 {
-    private IntPtr _mainloop;
+    private IntPtr _nativeMainloop;  // pa_mainloop* (non-threaded)
     private IntPtr _api;
     private IntPtr _context;
     private volatile bool _ready;
     private volatile bool _disposed;
 
+    // Managed thread that pumps the pa_mainloop event loop.
+    private Thread? _mainloopThread;
+    private volatile bool _mainloopRunning;
+
+    // Monitor used for mutual exclusion AND signalling between the mainloop
+    // thread and external callers. Replaces both pa_threaded_mainloop_lock/unlock
+    // and pa_threaded_mainloop_wait/signal.
+    private readonly object _paLock = new();
+
     // Prevent GC collection of delegates passed to native code.
-    // These must live as long as the context/mainloop they are registered with.
     private pa_context_notify_cb_t? _stateCallback;
     private pa_context_subscribe_cb_t? _subscribeCallback;
 
@@ -49,11 +65,19 @@ public sealed class PulseAudioBackend : IAudioBackend
     {
         if (_ready) return;
 
-        _mainloop = pa_threaded_mainloop_new();
-        if (_mainloop == IntPtr.Zero)
-            throw new InvalidOperationException("Failed to create pa_threaded_mainloop.");
+        // Prevent any libpulse code path from calling fork(), which causes debuggers
+        // (ptrace) to follow the child process and report a spurious "exit code 0".
+        //
+        // IMPORTANT: Environment.SetEnvironmentVariable only updates .NET's internal
+        // dictionary — native code (libpulse) calls getenv() which reads the C runtime
+        // environ, so we must use the POSIX setenv() via P/Invoke.
+        setenv("PULSE_NO_SPAWN", "1", 1);
 
-        _api = pa_threaded_mainloop_get_api(_mainloop);
+        _nativeMainloop = pa_mainloop_new();
+        if (_nativeMainloop == IntPtr.Zero)
+            throw new InvalidOperationException("Failed to create pa_mainloop.");
+
+        _api = pa_mainloop_get_api(_nativeMainloop);
 
         var proplist = pa_proplist_new();
         pa_proplist_sets(proplist, "application.name", "VolMon");
@@ -69,47 +93,97 @@ public sealed class PulseAudioBackend : IAudioBackend
         _stateCallback = OnContextState;
         pa_context_set_state_callback(_context, _stateCallback, IntPtr.Zero);
 
-        if (pa_context_connect(_context, null, pa_context_flags_t.NoFail, IntPtr.Zero) < 0)
+        var flags = pa_context_flags_t.NoAutospawn;
+        if (pa_context_connect(_context, null, flags, IntPtr.Zero) < 0)
             throw new InvalidOperationException(
                 $"pa_context_connect failed: {GetError()}");
 
-        if (pa_threaded_mainloop_start(_mainloop) < 0)
-            throw new InvalidOperationException("Failed to start pa_threaded_mainloop.");
-
-        // Wait for the context to become ready (or fail).
-        pa_threaded_mainloop_lock(_mainloop);
-        try
+        // Poll the mainloop synchronously until the context reaches Ready.
+        // No background thread yet — we own the mainloop exclusively here.
+        while (true)
         {
-            while (true)
-            {
-                var state = pa_context_get_state(_context);
-                if (state == pa_context_state_t.Ready)
-                {
-                    _ready = true;
-                    break;
-                }
-                if (state is pa_context_state_t.Failed or pa_context_state_t.Terminated)
-                {
-                    throw new InvalidOperationException(
-                        $"PulseAudio connection failed (state={state}): {GetError()}");
-                }
+            if (pa_mainloop_iterate(_nativeMainloop, 1, IntPtr.Zero) < 0)
+                throw new InvalidOperationException("pa_mainloop_iterate failed");
 
-                pa_threaded_mainloop_wait(_mainloop);
+            var state = pa_context_get_state(_context);
+            if (state == pa_context_state_t.Ready)
+            {
+                _ready = true;
+                break;
+            }
+            if (state is pa_context_state_t.Failed or pa_context_state_t.Terminated)
+            {
+                throw new InvalidOperationException(
+                    $"PulseAudio connection failed (state={state}): {GetError()}");
             }
         }
-        finally
+
+        // Start the managed background thread to pump the mainloop.
+        _mainloopThread = new Thread(MainloopThreadProc)
         {
-            pa_threaded_mainloop_unlock(_mainloop);
+            Name = "pa-mainloop",
+            IsBackground = true
+        };
+        _mainloopRunning = true;
+        _mainloopThread.Start();
+    }
+
+    /// <summary>
+    /// Background thread that continuously pumps the PA mainloop.
+    /// Holds <c>_paLock</c> while iterating; after each iteration it pulses
+    /// any threads waiting via <see cref="PaWait"/> and briefly yields the lock
+    /// so external callers can issue operations.
+    /// </summary>
+    private void MainloopThreadProc()
+    {
+        lock (_paLock)
+        {
+            while (_mainloopRunning)
+            {
+                if (_nativeMainloop == IntPtr.Zero)
+                    break;
+
+                // Release the lock, let pa_mainloop_iterate block on poll(),
+                // then re-acquire. We use a non-blocking iterate (block=0)
+                // combined with Monitor.Wait to properly release the lock
+                // while waiting for I/O.
+                //
+                // Actually, we need to release the lock during the blocking poll.
+                // Monitor.Wait atomically releases and re-acquires — but we need
+                // to call pa_mainloop_iterate, not just wait.
+                //
+                // Strategy: use non-blocking iterate, then Wait with a short timeout
+                // to yield the lock for external callers.
+
+                // Non-blocking iterate: process any pending events
+                int ret = pa_mainloop_iterate(_nativeMainloop, 0, IntPtr.Zero);
+                if (ret < 0)
+                    break;
+
+                if (ret > 0)
+                {
+                    // Events were dispatched — signal any waiters
+                    Monitor.PulseAll(_paLock);
+                }
+
+                // Yield the lock briefly so external callers can issue operations.
+                // The 5ms timeout keeps the mainloop responsive while allowing
+                // other threads to acquire _paLock.
+                Monitor.Wait(_paLock, 5);
+            }
         }
     }
 
     /// <summary>
-    /// State callback — runs on the mainloop thread (lock already held).
-    /// Just signals the waiting thread; never locks.
+    /// State callback — runs on the mainloop thread.
+    /// During the initial synchronous connect, the lock is NOT held (the polling
+    /// loop checks state directly after each iterate). Once the background thread
+    /// is running, the lock IS held and we signal waiting callers.
     /// </summary>
     private void OnContextState(IntPtr context, IntPtr userdata)
     {
-        pa_threaded_mainloop_signal(_mainloop, 0);
+        if (Monitor.IsEntered(_paLock))
+            Monitor.PulseAll(_paLock);
     }
 
     private string GetError()
@@ -120,6 +194,32 @@ public sealed class PulseAudioBackend : IAudioBackend
         return PtrToStringUtf8(ptr) ?? $"error {errno}";
     }
 
+    /// <summary>
+    /// Acquires the PA lock. Must be paired with <see cref="PaUnlock"/> in a finally block.
+    /// Wakes the mainloop so its <c>Monitor.Wait</c> returns and it can yield the lock.
+    /// </summary>
+    private void PaLock()
+    {
+        Monitor.Enter(_paLock);
+    }
+
+    private void PaUnlock()
+    {
+        // Pulse the mainloop thread so it resumes iterating
+        Monitor.PulseAll(_paLock);
+        Monitor.Exit(_paLock);
+    }
+
+    /// <summary>
+    /// Waits for a signal from a PA callback. Atomically releases the lock and waits,
+    /// then re-acquires the lock when signalled — same semantics as
+    /// <c>pa_threaded_mainloop_wait</c>.
+    /// </summary>
+    private void PaWait()
+    {
+        Monitor.Wait(_paLock);
+    }
+
     // ── Streams ──────────────────────────────────────────────────────
 
     /// <inheritdoc/>
@@ -128,12 +228,11 @@ public sealed class PulseAudioBackend : IAudioBackend
         EnsureConnected();
         var streams = new List<AudioStream>();
 
-        // Callback runs on mainloop thread (lock already held) — collect data, then signal.
         pa_sink_input_info_cb_t cb = (_, infoPtr, eol, _) =>
         {
             if (eol > 0)
             {
-                pa_threaded_mainloop_signal(_mainloop, 0);
+                Monitor.PulseAll(_paLock);
                 return;
             }
             if (infoPtr == IntPtr.Zero) return;
@@ -167,8 +266,7 @@ public sealed class PulseAudioBackend : IAudioBackend
             });
         };
 
-        // Lock → issue → wait (callback signals when eol) → unlock.
-        pa_threaded_mainloop_lock(_mainloop);
+        PaLock();
         try
         {
             var op = pa_context_get_sink_input_info_list(_context, cb, IntPtr.Zero);
@@ -176,16 +274,15 @@ public sealed class PulseAudioBackend : IAudioBackend
                 throw new InvalidOperationException($"pa_context_get_sink_input_info_list failed: {GetError()}");
 
             while (pa_operation_get_state(op) == pa_operation_state_t.Running)
-                pa_threaded_mainloop_wait(_mainloop);
+                PaWait();
 
             pa_operation_unref(op);
         }
         finally
         {
-            pa_threaded_mainloop_unlock(_mainloop);
+            PaUnlock();
         }
 
-        // GC.KeepAlive ensures the delegate isn't collected before the native side is done.
         GC.KeepAlive(cb);
         return Task.FromResult<IReadOnlyList<AudioStream>>(streams);
     }
@@ -199,7 +296,7 @@ public sealed class PulseAudioBackend : IAudioBackend
 
         var cvol = PercentToCvolume(2, volume);
 
-        pa_threaded_mainloop_lock(_mainloop);
+        PaLock();
         try
         {
             var op = pa_context_set_sink_input_volume(_context, idx, ref cvol, null, IntPtr.Zero);
@@ -207,7 +304,7 @@ public sealed class PulseAudioBackend : IAudioBackend
         }
         finally
         {
-            pa_threaded_mainloop_unlock(_mainloop);
+            PaUnlock();
         }
 
         return Task.CompletedTask;
@@ -220,7 +317,7 @@ public sealed class PulseAudioBackend : IAudioBackend
         if (!uint.TryParse(streamId, out var idx))
             throw new ArgumentException($"Invalid stream ID: {streamId}", nameof(streamId));
 
-        pa_threaded_mainloop_lock(_mainloop);
+        PaLock();
         try
         {
             var op = pa_context_set_sink_input_mute(_context, idx, muted ? 1 : 0, null, IntPtr.Zero);
@@ -228,7 +325,7 @@ public sealed class PulseAudioBackend : IAudioBackend
         }
         finally
         {
-            pa_threaded_mainloop_unlock(_mainloop);
+            PaUnlock();
         }
 
         return Task.CompletedTask;
@@ -248,7 +345,7 @@ public sealed class PulseAudioBackend : IAudioBackend
             if (eol > 0)
             {
                 if (Interlocked.Decrement(ref pendingLists) == 0)
-                    pa_threaded_mainloop_signal(_mainloop, 0);
+                    Monitor.PulseAll(_paLock);
                 return;
             }
             if (infoPtr == IntPtr.Zero) return;
@@ -270,7 +367,7 @@ public sealed class PulseAudioBackend : IAudioBackend
             if (eol > 0)
             {
                 if (Interlocked.Decrement(ref pendingLists) == 0)
-                    pa_threaded_mainloop_signal(_mainloop, 0);
+                    Monitor.PulseAll(_paLock);
                 return;
             }
             if (infoPtr == IntPtr.Zero) return;
@@ -292,7 +389,7 @@ public sealed class PulseAudioBackend : IAudioBackend
             });
         };
 
-        pa_threaded_mainloop_lock(_mainloop);
+        PaLock();
         try
         {
             var op1 = pa_context_get_sink_info_list(_context, sinkCb, IntPtr.Zero);
@@ -306,11 +403,10 @@ public sealed class PulseAudioBackend : IAudioBackend
                 throw new InvalidOperationException($"pa_context_get_source_info_list failed: {GetError()}");
             }
 
-            // Wait until both sink and source lists have delivered their eol.
             while (pa_operation_get_state(op1) == pa_operation_state_t.Running ||
                    pa_operation_get_state(op2) == pa_operation_state_t.Running)
             {
-                pa_threaded_mainloop_wait(_mainloop);
+                PaWait();
             }
 
             pa_operation_unref(op1);
@@ -318,7 +414,7 @@ public sealed class PulseAudioBackend : IAudioBackend
         }
         finally
         {
-            pa_threaded_mainloop_unlock(_mainloop);
+            PaUnlock();
         }
 
         GC.KeepAlive(sinkCb);
@@ -332,11 +428,9 @@ public sealed class PulseAudioBackend : IAudioBackend
         EnsureConnected();
         var cvol = PercentToCvolume(2, volume);
 
-        pa_threaded_mainloop_lock(_mainloop);
+        PaLock();
         try
         {
-            // Fire both sink and source — the one that doesn't match the name simply
-            // fails silently (no exception; the success callback is null).
             var op1 = pa_context_set_sink_volume_by_name(_context, deviceName, ref cvol, null, IntPtr.Zero);
             if (op1 != IntPtr.Zero) pa_operation_unref(op1);
 
@@ -345,7 +439,7 @@ public sealed class PulseAudioBackend : IAudioBackend
         }
         finally
         {
-            pa_threaded_mainloop_unlock(_mainloop);
+            PaUnlock();
         }
 
         return Task.CompletedTask;
@@ -357,7 +451,7 @@ public sealed class PulseAudioBackend : IAudioBackend
         EnsureConnected();
         var m = muted ? 1 : 0;
 
-        pa_threaded_mainloop_lock(_mainloop);
+        PaLock();
         try
         {
             var op1 = pa_context_set_sink_mute_by_name(_context, deviceName, m, null, IntPtr.Zero);
@@ -368,7 +462,7 @@ public sealed class PulseAudioBackend : IAudioBackend
         }
         finally
         {
-            pa_threaded_mainloop_unlock(_mainloop);
+            PaUnlock();
         }
 
         return Task.CompletedTask;
@@ -383,7 +477,7 @@ public sealed class PulseAudioBackend : IAudioBackend
 
         _subscribeCallback = OnSubscriptionEvent;
 
-        pa_threaded_mainloop_lock(_mainloop);
+        PaLock();
         try
         {
             pa_context_set_subscribe_callback(_context, _subscribeCallback, IntPtr.Zero);
@@ -398,7 +492,7 @@ public sealed class PulseAudioBackend : IAudioBackend
         }
         finally
         {
-            pa_threaded_mainloop_unlock(_mainloop);
+            PaUnlock();
         }
 
         return Task.CompletedTask;
@@ -409,7 +503,7 @@ public sealed class PulseAudioBackend : IAudioBackend
     {
         if (_context != IntPtr.Zero && _ready)
         {
-            pa_threaded_mainloop_lock(_mainloop);
+            PaLock();
             try
             {
                 pa_context_set_subscribe_callback(_context, null, IntPtr.Zero);
@@ -418,7 +512,7 @@ public sealed class PulseAudioBackend : IAudioBackend
             }
             finally
             {
-                pa_threaded_mainloop_unlock(_mainloop);
+                PaUnlock();
             }
         }
 
@@ -427,9 +521,8 @@ public sealed class PulseAudioBackend : IAudioBackend
 
     /// <summary>
     /// Subscription callback — runs on the mainloop thread (lock already held).
-    /// <b>Must not</b> call lock/unlock or block. Dispatches events to the thread pool
-    /// so that event handlers can safely call back into the backend (e.g. GetStreamsAsync)
-    /// without causing a re-entrant deadlock on the mainloop lock.
+    /// Dispatches events to the thread pool so that event handlers can safely call
+    /// back into the backend without causing a re-entrant deadlock.
     /// </summary>
     private void OnSubscriptionEvent(
         IntPtr context, pa_subscription_event_type_t type, uint idx, IntPtr userdata)
@@ -515,10 +608,14 @@ public sealed class PulseAudioBackend : IAudioBackend
         _disposed = true;
         _ready = false;
 
-        if (_mainloop != IntPtr.Zero)
-        {
-            pa_threaded_mainloop_stop(_mainloop);
-        }
+        // Stop the managed mainloop thread.
+        _mainloopRunning = false;
+        if (_nativeMainloop != IntPtr.Zero)
+            pa_mainloop_wakeup(_nativeMainloop);
+
+        // Pulse the lock so the mainloop thread wakes from Monitor.Wait
+        lock (_paLock) { Monitor.PulseAll(_paLock); }
+        _mainloopThread?.Join(TimeSpan.FromSeconds(2));
 
         if (_context != IntPtr.Zero)
         {
@@ -527,10 +624,10 @@ public sealed class PulseAudioBackend : IAudioBackend
             _context = IntPtr.Zero;
         }
 
-        if (_mainloop != IntPtr.Zero)
+        if (_nativeMainloop != IntPtr.Zero)
         {
-            pa_threaded_mainloop_free(_mainloop);
-            _mainloop = IntPtr.Zero;
+            pa_mainloop_free(_nativeMainloop);
+            _nativeMainloop = IntPtr.Zero;
         }
 
         // Release delegate references.

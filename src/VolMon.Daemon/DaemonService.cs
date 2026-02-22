@@ -37,44 +37,53 @@ public sealed class DaemonService : BackgroundService
     {
         _logger.LogInformation("VolMon daemon starting...");
 
-        // Load config
-        await _configManager.LoadAsync(stoppingToken);
-        await EnsureGroupIdsAsync(stoppingToken);
-        await EnsureIgnoredGroupExistsAsync(stoppingToken);
-        _configManager.StartWatching();
-        _configManager.StartPeriodicSave();
-        _configManager.ConfigChanged += OnConfigChanged;
-        _logger.LogInformation("Config loaded from {Path}", _configManager.ConfigPath);
-
-        // Set up stream watcher
-        _watcher = new StreamWatcher(_backend, _configManager, _watcherLogger);
-
-        // Subscribe to watcher events for broadcasting to clients
-        _watcher.StateChanged += OnWatcherStateChanged;
-
-        // Start audio monitoring
-        await _backend.StartMonitoringAsync(stoppingToken);
-        _logger.LogInformation("Audio monitoring started");
-
-        // Initial scan
-        await _watcher.InitialScanAsync(stoppingToken);
-
-        // Check for stale pipe / existing daemon before starting the IPC server.
-        await CleanStalePipeAsync(stoppingToken);
-
-        // Start IPC server
-        _ipcServer = new IpcDuplexServer(HandleIpcRequestAsync);
-        _ipcServer.Start();
-        _logger.LogInformation("IPC server started on pipe '{Pipe}'", IpcConstants.PipeName);
-
-        // Keep running until cancelled
         try
         {
+            // Load config
+            await _configManager.LoadAsync(stoppingToken);
+            await EnsureGroupIdsAsync(stoppingToken);
+            await EnsureIgnoredGroupExistsAsync(stoppingToken);
+            _configManager.StartWatching();
+            _configManager.StartPeriodicSave();
+            _configManager.ConfigChanged += OnConfigChanged;
+            _logger.LogInformation("Config loaded from {Path}", _configManager.ConfigPath);
+
+            // Set up stream watcher
+            _watcher = new StreamWatcher(_backend, _configManager, _watcherLogger);
+
+            // Subscribe to watcher events for broadcasting to clients
+            _watcher.StateChanged += OnWatcherStateChanged;
+
+            // Start audio monitoring
+            await _backend.StartMonitoringAsync(stoppingToken);
+            _logger.LogInformation("Audio monitoring started");
+
+            // Initial scan
+            await _watcher.InitialScanAsync(stoppingToken);
+
+            // Check for stale pipe / existing daemon before starting the IPC server.
+            await CleanStalePipeAsync(stoppingToken);
+
+            // Start IPC server
+            _ipcServer = new IpcDuplexServer(HandleIpcRequestAsync);
+            _ipcServer.Start();
+            _logger.LogInformation("IPC server started on pipe '{Pipe}'", IpcConstants.PipeName);
+
+            // Keep running until cancelled
             await Task.Delay(Timeout.Infinite, stoppingToken);
         }
         catch (OperationCanceledException)
         {
             _logger.LogInformation("VolMon daemon stopping...");
+        }
+        catch (Exception ex)
+        {
+            // Write directly to stderr — logger output may not flush before the
+            // host terminates, especially under a debugger.
+            Console.Error.WriteLine($"[FATAL] {ex}");
+            Console.Error.Flush();
+            _logger.LogCritical(ex, "VolMon daemon failed during startup");
+            throw; // Re-throw so the host still triggers shutdown
         }
         finally
         {
@@ -88,8 +97,11 @@ public sealed class DaemonService : BackgroundService
             await _configManager.FlushIfDirtyAsync();
             _configManager.StopWatching();
 
-            _watcher.StateChanged -= OnWatcherStateChanged;
-            _watcher.Dispose();
+            if (_watcher is not null)
+            {
+                _watcher.StateChanged -= OnWatcherStateChanged;
+                _watcher.Dispose();
+            }
         }
     }
 

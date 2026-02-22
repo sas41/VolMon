@@ -255,34 +255,30 @@ internal static partial class LibPulse
     public delegate void pa_source_output_info_cb_t(
         IntPtr context, IntPtr info, int eol, IntPtr userdata);
 
-    // ── Threaded Main Loop ───────────────────────────────────────────
+    // ── Non-threaded Main Loop ──────────────────────────────────────
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    public static extern IntPtr pa_threaded_mainloop_new();
+    public static extern IntPtr pa_mainloop_new();
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void pa_threaded_mainloop_free(IntPtr m);
+    public static extern void pa_mainloop_free(IntPtr m);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    public static extern int pa_threaded_mainloop_start(IntPtr m);
+    public static extern IntPtr pa_mainloop_get_api(IntPtr m);
 
+    /// <summary>
+    /// Run a single iteration of the main loop. Returns negative on error/quit,
+    /// or the number of sources dispatched. When <paramref name="block"/> is 1,
+    /// blocks until events are ready; when 0, returns immediately.
+    /// </summary>
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void pa_threaded_mainloop_stop(IntPtr m);
+    public static extern int pa_mainloop_iterate(IntPtr m, int block, IntPtr retval);
 
+    /// <summary>
+    /// Interrupt a blocking <see cref="pa_mainloop_iterate"/> call from another thread.
+    /// </summary>
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void pa_threaded_mainloop_lock(IntPtr m);
-
-    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void pa_threaded_mainloop_unlock(IntPtr m);
-
-    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void pa_threaded_mainloop_wait(IntPtr m);
-
-    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void pa_threaded_mainloop_signal(IntPtr m, int wait_for_accept);
-
-    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    public static extern IntPtr pa_threaded_mainloop_get_api(IntPtr m);
+    public static extern void pa_mainloop_wakeup(IntPtr m);
 
     // ── Proplist ─────────────────────────────────────────────────────
 
@@ -418,6 +414,17 @@ internal static partial class LibPulse
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr pa_strerror(int error);
+
+    // ── libc ───────────────────────────────────────────────────────────
+    // Environment.SetEnvironmentVariable only updates .NET's internal dictionary;
+    // native code (like libpulse) calls getenv() which reads the C runtime environ.
+    // We need the real POSIX setenv so PULSE_NO_SPAWN is visible to libpulse.
+
+    [DllImport("libc", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
+    public static extern int setenv(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string value,
+        int overwrite);
 
     // ── Helpers ──────────────────────────────────────────────────────
 

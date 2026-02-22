@@ -19,11 +19,6 @@ public sealed class DaemonService : BackgroundService
     private StreamWatcher? _watcher;
     private IpcDuplexServer? _ipcServer;
 
-    // ── Save debounce ────────────────────────────────────────────────
-    private CancellationTokenSource? _saveDebounceCts;
-    private readonly SemaphoreSlim _saveLock = new(1, 1);
-    private const int SaveDebounceMs = 500;
-
     public DaemonService(
         IAudioBackend backend,
         ConfigManager configManager,
@@ -45,6 +40,7 @@ public sealed class DaemonService : BackgroundService
         await EnsureGroupIdsAsync(stoppingToken);
         await EnsureIgnoredGroupExistsAsync(stoppingToken);
         _configManager.StartWatching();
+        _configManager.StartPeriodicSave();
         _configManager.ConfigChanged += OnConfigChanged;
         _logger.LogInformation("Config loaded from {Path}", _configManager.ConfigPath);
 
@@ -81,11 +77,14 @@ public sealed class DaemonService : BackgroundService
                 await _ipcServer.StopAsync();
 
             await _backend.StopMonitoringAsync();
+
+            // Flush any pending config changes before shutting down
+            _configManager.StopPeriodicSave();
+            await _configManager.FlushIfDirtyAsync();
             _configManager.StopWatching();
+
             _watcher.StateChanged -= OnWatcherStateChanged;
             _watcher.Dispose();
-            _saveDebounceCts?.Dispose();
-            _saveLock.Dispose();
         }
     }
 
@@ -183,75 +182,25 @@ public sealed class DaemonService : BackgroundService
         }
     }
 
-    private IpcEvent BuildStateEvent()
+    private IpcEvent BuildStateEvent() => new()
     {
-        return new IpcEvent
-        {
-            Name = "state-changed",
-            Status = new DaemonStatus
-            {
-                Running = true,
-                ActiveStreams = _watcher?.ActiveStreams.Count ?? 0,
-                ActiveDevices = _watcher?.KnownDevices.Count ?? 0,
-                ConfiguredGroups = _configManager.Config.Groups.Count,
-                StartedAt = _startedAt
-            },
-            Groups = _configManager.Config.Groups,
-            Streams = _watcher?.ActiveStreams.Values.Select(s => new AudioStreamInfo
-            {
-                Id = s.Id,
-                BinaryName = s.BinaryName,
-                ApplicationClass = s.ApplicationClass,
-                Volume = s.Volume,
-                Muted = s.Muted,
-                AssignedGroup = s.AssignedGroup
-            }).ToList() ?? [],
-            Devices = _watcher?.KnownDevices.Values.Select(d => new AudioDeviceInfo
-            {
-                Name = d.Name,
-                Description = d.Description,
-                Type = d.Type.ToString().ToLowerInvariant(),
-                Volume = d.Volume,
-                Muted = d.Muted,
-                AssignedGroup = d.AssignedGroup
-            }).ToList() ?? []
-        };
-    }
+        Name = "state-changed",
+        Status = BuildStatus(),
+        Groups = _configManager.Config.Groups,
+        Streams = SnapshotStreams(),
+        Devices = SnapshotDevices()
+    };
 
     // ── Command handlers ─────────────────────────────────────────────
 
     private IpcResponse HandleListGroups() =>
         new() { Success = true, Groups = _configManager.Config.Groups };
 
-    private IpcResponse HandleListStreams()
-    {
-        var streams = _watcher?.ActiveStreams.Values.Select(s => new AudioStreamInfo
-        {
-            Id = s.Id,
-            BinaryName = s.BinaryName,
-            ApplicationClass = s.ApplicationClass,
-            Volume = s.Volume,
-            Muted = s.Muted,
-            AssignedGroup = s.AssignedGroup
-        }).ToList() ?? [];
+    private IpcResponse HandleListStreams() =>
+        new() { Success = true, Streams = SnapshotStreams() };
 
-        return new IpcResponse { Success = true, Streams = streams };
-    }
-
-    private IpcResponse HandleListDevices()
-    {
-        var devices = _watcher?.KnownDevices.Values.Select(d => new AudioDeviceInfo
-        {
-            Name = d.Name,
-            Description = d.Description,
-            Type = d.Type.ToString().ToLowerInvariant(),
-            Volume = d.Volume,
-            Muted = d.Muted,
-            AssignedGroup = d.AssignedGroup
-        }).ToList() ?? [];
-
-        return new IpcResponse { Success = true, Devices = devices };
-    }
+    private IpcResponse HandleListDevices() =>
+        new() { Success = true, Devices = SnapshotDevices() };
 
     private async Task<IpcResponse> HandleSetGroupVolumeAsync(IpcRequest request, CancellationToken ct)
     {
@@ -263,7 +212,7 @@ public sealed class DaemonService : BackgroundService
             return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
 
         group.Volume = Math.Clamp(request.Volume.Value, 0, 100);
-        DebounceSaveAsync(ct);
+        _configManager.MarkDirty();
 
         if (_watcher is not null)
             await _watcher.ApplyGroupSettingsAsync(group, ct);
@@ -278,7 +227,7 @@ public sealed class DaemonService : BackgroundService
             return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
 
         group.Muted = muted;
-        DebounceSaveAsync(ct);
+        _configManager.MarkDirty();
 
         if (_watcher is not null)
             await _watcher.ApplyGroupSettingsAsync(group, ct);
@@ -309,7 +258,7 @@ public sealed class DaemonService : BackgroundService
         }
 
         _configManager.Config.Groups.Add(request.Group);
-        await _configManager.SaveAsync(ct);
+        _configManager.MarkDirty();
 
         if (_watcher is not null)
             await _watcher.ReassignAllAsync(ct);
@@ -326,7 +275,7 @@ public sealed class DaemonService : BackgroundService
             return new IpcResponse { Success = false, Error = "The Ignored group cannot be deleted" };
 
         _configManager.Config.Groups.Remove(group);
-        await _configManager.SaveAsync(ct);
+        _configManager.MarkDirty();
 
         if (_watcher is not null)
             await _watcher.ReassignAllAsync(ct);
@@ -348,7 +297,7 @@ public sealed class DaemonService : BackgroundService
             g.Programs.RemoveAll(p => p.Equals(request.ProgramName, StringComparison.OrdinalIgnoreCase));
 
         group.Programs.Add(request.ProgramName);
-        await _configManager.SaveAsync(ct);
+        _configManager.MarkDirty();
 
         if (_watcher is not null)
             await _watcher.ReassignAllAsync(ct);
@@ -370,7 +319,7 @@ public sealed class DaemonService : BackgroundService
         if (removed == 0)
             return new IpcResponse { Success = false, Error = $"Program '{request.ProgramName}' not in group '{group.Name}'" };
 
-        await _configManager.SaveAsync(ct);
+        _configManager.MarkDirty();
 
         if (_watcher is not null)
             await _watcher.ReassignAllAsync(ct);
@@ -392,7 +341,7 @@ public sealed class DaemonService : BackgroundService
             g.Devices.RemoveAll(d => d.Equals(request.DeviceName, StringComparison.OrdinalIgnoreCase));
 
         group.Devices.Add(request.DeviceName);
-        await _configManager.SaveAsync(ct);
+        _configManager.MarkDirty();
 
         if (_watcher is not null)
             await _watcher.ReassignAllAsync(ct);
@@ -414,7 +363,7 @@ public sealed class DaemonService : BackgroundService
         if (removed == 0)
             return new IpcResponse { Success = false, Error = $"Device '{request.DeviceName}' not in group '{group.Name}'" };
 
-        await _configManager.SaveAsync(ct);
+        _configManager.MarkDirty();
 
         // Reset device volume to 100% and unmute when removed from a group
         try
@@ -433,14 +382,14 @@ public sealed class DaemonService : BackgroundService
         return new IpcResponse { Success = true };
     }
 
-    private async Task<IpcResponse> HandleMoveGroupAsync(IpcRequest request, CancellationToken ct)
+    private Task<IpcResponse> HandleMoveGroupAsync(IpcRequest request, CancellationToken ct)
     {
         if (request.Direction is null)
-            return new IpcResponse { Success = false, Error = "Direction is required (up or down)" };
+            return Task.FromResult(new IpcResponse { Success = false, Error = "Direction is required (up or down)" });
 
         var group = ResolveGroup(request);
         if (group is null)
-            return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
+            return Task.FromResult(new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" });
 
         var groups = _configManager.Config.Groups;
         var index = groups.IndexOf(group);
@@ -450,57 +399,57 @@ public sealed class DaemonService : BackgroundService
             : index + 1;
 
         if (newIndex < 0 || newIndex >= groups.Count)
-            return new IpcResponse { Success = true }; // Already at boundary, no-op
+            return Task.FromResult(new IpcResponse { Success = true }); // Already at boundary, no-op
 
         // Swap
         (groups[index], groups[newIndex]) = (groups[newIndex], groups[index]);
-        await _configManager.SaveAsync(ct);
+        _configManager.MarkDirty();
 
-        return new IpcResponse { Success = true };
+        return Task.FromResult(new IpcResponse { Success = true });
     }
 
-    private async Task<IpcResponse> HandleSetGroupColorAsync(IpcRequest request, CancellationToken ct)
+    private Task<IpcResponse> HandleSetGroupColorAsync(IpcRequest request, CancellationToken ct)
     {
         if (request.Color is null)
-            return new IpcResponse { Success = false, Error = "Color is required" };
+            return Task.FromResult(new IpcResponse { Success = false, Error = "Color is required" });
 
         var group = ResolveGroup(request);
         if (group is null)
-            return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
+            return Task.FromResult(new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" });
 
         group.Color = request.Color;
-        DebounceSaveAsync(ct);
+        _configManager.MarkDirty();
 
-        return new IpcResponse { Success = true };
+        return Task.FromResult(new IpcResponse { Success = true });
     }
 
-    private async Task<IpcResponse> HandleRenameGroupAsync(IpcRequest request, CancellationToken ct)
+    private Task<IpcResponse> HandleRenameGroupAsync(IpcRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.NewName))
-            return new IpcResponse { Success = false, Error = "New name is required" };
+            return Task.FromResult(new IpcResponse { Success = false, Error = "New name is required" });
 
         var group = ResolveGroup(request);
         if (group is null)
-            return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
+            return Task.FromResult(new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" });
         if (group.IsIgnored)
-            return new IpcResponse { Success = false, Error = "The Ignored group cannot be renamed" };
+            return Task.FromResult(new IpcResponse { Success = false, Error = "The Ignored group cannot be renamed" });
 
         // Check the new name isn't already taken
         if (FindGroupByName(request.NewName) is not null)
-            return new IpcResponse { Success = false, Error = $"A group named '{request.NewName}' already exists" };
+            return Task.FromResult(new IpcResponse { Success = false, Error = $"A group named '{request.NewName}' already exists" });
 
         group.Name = request.NewName;
-        await _configManager.SaveAsync(ct);
+        _configManager.MarkDirty();
 
         // No need to update AssignedGroup on streams — they reference by GUID now
         _logger.LogInformation("Renamed group {Id} to '{NewName}'", group.Id, request.NewName);
-        return new IpcResponse { Success = true };
+        return Task.FromResult(new IpcResponse { Success = true });
     }
 
-    private async Task<IpcResponse> HandleReorderGroupsAsync(IpcRequest request, CancellationToken ct)
+    private Task<IpcResponse> HandleReorderGroupsAsync(IpcRequest request, CancellationToken ct)
     {
         if (request.GroupOrder is null || request.GroupOrder.Count == 0)
-            return new IpcResponse { Success = false, Error = "GroupOrder is required" };
+            return Task.FromResult(new IpcResponse { Success = false, Error = "GroupOrder is required" });
 
         var groups = _configManager.Config.Groups;
         var ordered = new List<AudioGroup>();
@@ -525,10 +474,10 @@ public sealed class DaemonService : BackgroundService
 
         groups.Clear();
         groups.AddRange(ordered);
-        await _configManager.SaveAsync(ct);
+        _configManager.MarkDirty();
 
         _logger.LogInformation("Groups reordered: {Order}", string.Join(", ", ordered.Select(g => g.Name)));
-        return new IpcResponse { Success = true };
+        return Task.FromResult(new IpcResponse { Success = true });
     }
 
     private async Task<IpcResponse> HandleSetDefaultGroupAsync(IpcRequest request, CancellationToken ct)
@@ -542,7 +491,7 @@ public sealed class DaemonService : BackgroundService
             g.IsDefault = false;
 
         group.IsDefault = true;
-        await _configManager.SaveAsync(ct);
+        _configManager.MarkDirty();
 
         if (_watcher is not null)
             await _watcher.ReassignAllAsync(ct);
@@ -550,42 +499,14 @@ public sealed class DaemonService : BackgroundService
         return new IpcResponse { Success = true };
     }
 
-    private IpcResponse HandleStatus()
+    private IpcResponse HandleStatus() => new()
     {
-        var resp = new IpcResponse
-        {
-            Success = true,
-            Status = new DaemonStatus
-            {
-                Running = true,
-                ActiveStreams = _watcher?.ActiveStreams.Count ?? 0,
-                ActiveDevices = _watcher?.KnownDevices.Count ?? 0,
-                ConfiguredGroups = _configManager.Config.Groups.Count,
-                StartedAt = _startedAt
-            },
-            Groups = _configManager.Config.Groups,
-            Streams = _watcher?.ActiveStreams.Values.Select(s => new AudioStreamInfo
-            {
-                Id = s.Id,
-                BinaryName = s.BinaryName,
-                ApplicationClass = s.ApplicationClass,
-                Volume = s.Volume,
-                Muted = s.Muted,
-                AssignedGroup = s.AssignedGroup
-            }).ToList() ?? [],
-            Devices = _watcher?.KnownDevices.Values.Select(d => new AudioDeviceInfo
-            {
-                Name = d.Name,
-                Description = d.Description,
-                Type = d.Type.ToString().ToLowerInvariant(),
-                Volume = d.Volume,
-                Muted = d.Muted,
-                AssignedGroup = d.AssignedGroup
-            }).ToList() ?? []
-        };
-
-        return resp;
-    }
+        Success = true,
+        Status = BuildStatus(),
+        Groups = _configManager.Config.Groups,
+        Streams = SnapshotStreams(),
+        Devices = SnapshotDevices()
+    };
 
     private async Task<IpcResponse> HandleReloadAsync(CancellationToken ct)
     {
@@ -596,40 +517,45 @@ public sealed class DaemonService : BackgroundService
         return new IpcResponse { Success = true };
     }
 
-    // ── Debounced config save ────────────────────────────────────────
+    // ── Snapshot helpers ────────────────────────────────────────────
 
-    /// <summary>
-    /// Schedules a config save after a debounce delay. Rapid calls (e.g. from
-    /// volume slider drags) are coalesced into a single disk write.
-    /// </summary>
-    private void DebounceSaveAsync(CancellationToken ct)
+    /// <summary>Cached lowercase device-type strings to avoid ToString + ToLowerInvariant per device.</summary>
+    private static readonly Dictionary<DeviceType, string> DeviceTypeStrings = new()
     {
-        _saveDebounceCts?.Cancel();
-        _saveDebounceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var token = _saveDebounceCts.Token;
+        [DeviceType.Sink] = "sink",
+        [DeviceType.Source] = "source"
+    };
 
-        _ = Task.Run(async () =>
+    private DaemonStatus BuildStatus() => new()
+    {
+        Running = true,
+        ActiveStreams = _watcher?.ActiveStreams.Count ?? 0,
+        ActiveDevices = _watcher?.KnownDevices.Count ?? 0,
+        ConfiguredGroups = _configManager.Config.Groups.Count,
+        StartedAt = _startedAt
+    };
+
+    private List<AudioStreamInfo> SnapshotStreams() =>
+        _watcher?.ActiveStreams.Values.Select(s => new AudioStreamInfo
         {
-            try
-            {
-                await Task.Delay(SaveDebounceMs, token);
-                await _saveLock.WaitAsync(token);
-                try
-                {
-                    await _configManager.SaveAsync(token);
-                }
-                finally
-                {
-                    _saveLock.Release();
-                }
-            }
-            catch (OperationCanceledException) { /* debounced away */ }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to save config (debounced)");
-            }
-        }, CancellationToken.None);
-    }
+            Id = s.Id,
+            BinaryName = s.BinaryName,
+            ApplicationClass = s.ApplicationClass,
+            Volume = s.Volume,
+            Muted = s.Muted,
+            AssignedGroup = s.AssignedGroup
+        }).ToList() ?? [];
+
+    private List<AudioDeviceInfo> SnapshotDevices() =>
+        _watcher?.KnownDevices.Values.Select(d => new AudioDeviceInfo
+        {
+            Name = d.Name,
+            Description = d.Description,
+            Type = DeviceTypeStrings.GetValueOrDefault(d.Type, "sink"),
+            Volume = d.Volume,
+            Muted = d.Muted,
+            AssignedGroup = d.AssignedGroup
+        }).ToList() ?? [];
 
     // ── Helpers ──────────────────────────────────────────────────────
 

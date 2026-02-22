@@ -5,6 +5,8 @@ namespace VolMon.Core.Config;
 
 /// <summary>
 /// Loads, saves, and watches the VolMon config file.
+/// Supports periodic flushing: call <see cref="MarkDirty"/> when the in-memory
+/// config changes and <see cref="StartPeriodicSave"/> to flush every N seconds.
 /// </summary>
 public sealed class ConfigManager : IDisposable
 {
@@ -16,9 +18,16 @@ public sealed class ConfigManager : IDisposable
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
     };
 
+    private const int DefaultFlushIntervalSeconds = 10;
+
     private readonly string _configPath;
     private FileSystemWatcher? _watcher;
     private VolMonConfig _config = new();
+
+    // ── Periodic save state ──────────────────────────────────────────
+    private volatile bool _isDirty;
+    private Timer? _flushTimer;
+    private readonly SemaphoreSlim _saveLock = new(1, 1);
 
     /// <summary>
     /// Raised when the config file changes on disk.
@@ -68,7 +77,9 @@ public sealed class ConfigManager : IDisposable
     }
 
     /// <summary>
-    /// Saves the current config to disk.
+    /// Saves the current config to disk immediately.
+    /// Prefer <see cref="MarkDirty"/> for routine changes; use this only for
+    /// one-off bootstrap writes (first-run, migrations).
     /// </summary>
     public async Task SaveAsync(CancellationToken ct = default)
     {
@@ -78,6 +89,55 @@ public sealed class ConfigManager : IDisposable
 
         var json = JsonSerializer.Serialize(_config, JsonOptions);
         await File.WriteAllTextAsync(_configPath, json, ct);
+        _isDirty = false;
+    }
+
+    // ── Periodic / dirty-flag save ───────────────────────────────────
+
+    /// <summary>
+    /// Marks the in-memory config as dirty so the next periodic flush writes it
+    /// to disk. This is cheap to call from any handler.
+    /// </summary>
+    public void MarkDirty() => _isDirty = true;
+
+    /// <summary>
+    /// Starts a background timer that flushes dirty config to disk at a fixed
+    /// interval (default 10 s).
+    /// </summary>
+    public void StartPeriodicSave(int intervalSeconds = DefaultFlushIntervalSeconds)
+    {
+        _flushTimer?.Dispose();
+        var interval = TimeSpan.FromSeconds(intervalSeconds);
+        _flushTimer = new Timer(_ => _ = FlushIfDirtyAsync(), null, interval, interval);
+    }
+
+    /// <summary>
+    /// Stops the periodic save timer.
+    /// </summary>
+    public void StopPeriodicSave()
+    {
+        _flushTimer?.Dispose();
+        _flushTimer = null;
+    }
+
+    /// <summary>
+    /// If the config is dirty, writes it to disk. Safe to call concurrently;
+    /// concurrent callers will be serialized by the internal lock.
+    /// </summary>
+    public async Task FlushIfDirtyAsync(CancellationToken ct = default)
+    {
+        if (!_isDirty) return;
+
+        await _saveLock.WaitAsync(ct);
+        try
+        {
+            if (!_isDirty) return; // double-check after acquiring lock
+            await SaveAsync(ct);
+        }
+        finally
+        {
+            _saveLock.Release();
+        }
     }
 
     /// <summary>
@@ -127,6 +187,8 @@ public sealed class ConfigManager : IDisposable
 
     public void Dispose()
     {
+        StopPeriodicSave();
         StopWatching();
+        _saveLock.Dispose();
     }
 }

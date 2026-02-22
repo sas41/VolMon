@@ -18,6 +18,8 @@ public partial class OverlayWindow : Window
 {
     private readonly IPlatformOverlayHelper _platformHelper;
     private DispatcherTimer? _hideTimer;
+    private string? _lastColorHex;
+    private SolidColorBrush? _cachedBrush;
     private static readonly TimeSpan AutoHideDelay = TimeSpan.FromSeconds(2);
 
     /// <summary>Fixed inner width of the volume bar in DIPs.</summary>
@@ -72,12 +74,17 @@ public partial class OverlayWindow : Window
         var fraction = volume / 100.0;
         VolumeFill.Width = Math.Max(0, BarWidth * fraction);
 
-        // Update volume bar color to match group color (dimmed if muted)
+        // Update volume bar color to match group color (dimmed if muted).
+        // Cache the brush to avoid re-parsing the same hex string repeatedly.
         try
         {
-            var brush = SolidColorBrush.Parse(colorHex);
-            if (muted) brush.Opacity = 0.4;
-            VolumeFill.Background = brush;
+            if (_cachedBrush is null || _lastColorHex != colorHex)
+            {
+                _cachedBrush = SolidColorBrush.Parse(colorHex);
+                _lastColorHex = colorHex;
+            }
+            _cachedBrush.Opacity = muted ? 0.4 : 1.0;
+            VolumeFill.Background = _cachedBrush;
         }
         catch { VolumeFill.Background = SolidColorBrush.Parse("#4A90D9"); }
 
@@ -105,14 +112,17 @@ public partial class OverlayWindow : Window
             }, TimeSpan.FromMilliseconds(50));
         }, TimeSpan.FromMilliseconds(30));
 
-        // Reset auto-hide timer
-        _hideTimer?.Stop();
-        _hideTimer = new DispatcherTimer { Interval = AutoHideDelay };
-        _hideTimer.Tick += (_, _) =>
+        // Reset auto-hide timer (reuse the same instance)
+        if (_hideTimer is null)
         {
-            _hideTimer.Stop();
-            Hide();
-        };
+            _hideTimer = new DispatcherTimer { Interval = AutoHideDelay };
+            _hideTimer.Tick += (_, _) =>
+            {
+                _hideTimer.Stop();
+                Hide();
+            };
+        }
+        _hideTimer.Stop();
         _hideTimer.Start();
     }
 

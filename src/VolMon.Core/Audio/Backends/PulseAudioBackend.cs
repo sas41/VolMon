@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.RegularExpressions;
@@ -13,6 +14,9 @@ public sealed partial class PulseAudioBackend : IAudioBackend
     private Process? _subscribeProcess;
     private CancellationTokenSource? _monitorCts;
     private Task? _monitorTask;
+
+    /// <summary>Cache for dynamically-built property regex patterns.</summary>
+    private static readonly ConcurrentDictionary<string, Regex> PropertyRegexCache = new();
 
     public event EventHandler<AudioStreamEventArgs>? StreamCreated;
     public event EventHandler<AudioStreamEventArgs>? StreamRemoved;
@@ -216,7 +220,7 @@ public sealed partial class PulseAudioBackend : IAudioBackend
 
         foreach (var block in blocks)
         {
-            var idMatch = Regex.Match(block, @"^(\d+)");
+            var idMatch = LeadingDigitsRegex().Match(block);
             if (!idMatch.Success) continue;
 
             var id = idMatch.Groups[1].Value;
@@ -283,13 +287,13 @@ public sealed partial class PulseAudioBackend : IAudioBackend
 
         foreach (var block in blocks)
         {
-            var idMatch = Regex.Match(block, @"^(\d+)");
+            var idMatch = LeadingDigitsRegex().Match(block);
             if (!idMatch.Success) continue;
 
             var id = idMatch.Groups[1].Value;
 
             // Name is on a line like "	Name: alsa_output.pci-0000_00_1f.3.analog-stereo"
-            var nameMatch = Regex.Match(block, @"^\s*Name:\s*(.+)$", RegexOptions.Multiline);
+            var nameMatch = DeviceNameRegex().Match(block);
             if (!nameMatch.Success) continue;
             var name = nameMatch.Groups[1].Value.Trim();
 
@@ -297,7 +301,7 @@ public sealed partial class PulseAudioBackend : IAudioBackend
             if (type == DeviceType.Source && name.Contains(".monitor"))
                 continue;
 
-            var descMatch = Regex.Match(block, @"^\s*Description:\s*(.+)$", RegexOptions.Multiline);
+            var descMatch = DeviceDescriptionRegex().Match(block);
             var description = descMatch.Success ? descMatch.Groups[1].Value.Trim() : null;
 
             var volume = ParseVolume(block);
@@ -319,7 +323,7 @@ public sealed partial class PulseAudioBackend : IAudioBackend
 
     private static int ParseVolume(string block)
     {
-        var match = Regex.Match(block, @"Volume:.*?(\d+)%");
+        var match = VolumeRegex().Match(block);
         if (match.Success && int.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var vol))
             return vol;
         return 100;
@@ -327,14 +331,15 @@ public sealed partial class PulseAudioBackend : IAudioBackend
 
     private static bool ParseMuted(string block)
     {
-        var match = Regex.Match(block, @"Mute:\s*(yes|no)", RegexOptions.IgnoreCase);
+        var match = MuteRegex().Match(block);
         return match.Success && match.Groups[1].Value.Equals("yes", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? ParseProperty(string block, string propertyName)
     {
-        var pattern = $@"{Regex.Escape(propertyName)}\s*=\s*""([^""]*)""";
-        var match = Regex.Match(block, pattern);
+        var regex = PropertyRegexCache.GetOrAdd(propertyName, static name =>
+            new Regex($@"{Regex.Escape(name)}\s*=\s*""([^""]*)""", RegexOptions.Compiled));
+        var match = regex.Match(block);
         return match.Success ? match.Groups[1].Value : null;
     }
 
@@ -391,4 +396,19 @@ public sealed partial class PulseAudioBackend : IAudioBackend
 
     [GeneratedRegex(@"Event '(?<event>\w+)' on (?<type>[\w-]+) #(?<id>\d+)")]
     private static partial Regex SubscribeEventRegex();
+
+    [GeneratedRegex(@"^(\d+)")]
+    private static partial Regex LeadingDigitsRegex();
+
+    [GeneratedRegex(@"^\s*Name:\s*(.+)$", RegexOptions.Multiline)]
+    private static partial Regex DeviceNameRegex();
+
+    [GeneratedRegex(@"^\s*Description:\s*(.+)$", RegexOptions.Multiline)]
+    private static partial Regex DeviceDescriptionRegex();
+
+    [GeneratedRegex(@"Volume:.*?(\d+)%")]
+    private static partial Regex VolumeRegex();
+
+    [GeneratedRegex(@"Mute:\s*(yes|no)", RegexOptions.IgnoreCase)]
+    private static partial Regex MuteRegex();
 }

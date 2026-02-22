@@ -104,6 +104,7 @@ public class MainViewModel : ReactiveObject
     private IpcDuplexClient? _client;
     private Guid? _ignoredGroupId;
     private bool _isConnecting;
+    private string? _lastStateFingerprint;
 
     // ── Shortcut target state ────────────────────────────────────────
     private Guid? _targetGroupId;
@@ -233,19 +234,10 @@ public class MainViewModel : ReactiveObject
     {
         if (evt.Name != "state-changed") return;
 
-        // Marshal to UI thread
+        // Marshal to UI thread — pass event fields directly to avoid an
+        // unnecessary IpcResponse wrapper allocation.
         Dispatcher.UIThread.Post(() =>
-        {
-            var resp = new IpcResponse
-            {
-                Success = true,
-                Status = evt.Status,
-                Groups = evt.Groups,
-                Streams = evt.Streams,
-                Devices = evt.Devices
-            };
-            RefreshData(resp);
-        });
+            RefreshData(evt.Status, evt.Groups, evt.Streams, evt.Devices));
     }
 
     /// <summary>
@@ -266,9 +258,23 @@ public class MainViewModel : ReactiveObject
 
     // ── Data refresh (called from push events) ───────────────────────
 
-    private void RefreshData(IpcResponse resp)
+    private void RefreshData(IpcResponse resp) =>
+        RefreshData(resp.Status, resp.Groups, resp.Streams, resp.Devices);
+
+    private void RefreshData(
+        DaemonStatus? status,
+        List<AudioGroup>? groups,
+        List<AudioStreamInfo>? streams,
+        List<AudioDeviceInfo>? devices)
     {
-        var status = resp.Status;
+        // Quick fingerprint to skip expensive reconciliation when nothing changed.
+        // We combine the cheapest-to-read counts + mutable scalars into a string
+        // that changes whenever the UI would need to update.
+        var fingerprint = BuildFingerprint(status, groups, streams, devices);
+        if (fingerprint == _lastStateFingerprint)
+            return;
+        _lastStateFingerprint = fingerprint;
+
         if (status is not null)
         {
             DaemonStatusText = "Running";
@@ -280,10 +286,10 @@ public class MainViewModel : ReactiveObject
         _ignoredGroupId = null;
 
         var desiredGroups = new List<GroupColumnViewModel>();
-        if (resp.Groups is not null)
+        if (groups is not null)
         {
             var ci = 0;
-            foreach (var g in resp.Groups)
+            foreach (var g in groups)
             {
                 if (g.IsIgnored) { _ignoredGroupId = g.Id; continue; }
                 var color = g.Color ?? ColorPalette[ci % ColorPalette.Length];
@@ -311,11 +317,11 @@ public class MainViewModel : ReactiveObject
 
         var desiredPrograms = new List<PoolItemViewModel>();
 
-        if (resp.Streams is not null)
+        if (streams is not null)
         {
             var bestAssignment = new Dictionary<string, Guid?>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var s in resp.Streams)
+            foreach (var s in streams)
             {
                 var isIgnoredOrNull = s.AssignedGroup is null ||
                     (_ignoredGroupId.HasValue && s.AssignedGroup == _ignoredGroupId.Value);
@@ -366,9 +372,9 @@ public class MainViewModel : ReactiveObject
         var desiredInputs = new List<PoolItemViewModel>();
         var desiredOutputs = new List<PoolItemViewModel>();
 
-        if (resp.Devices is not null)
+        if (devices is not null)
         {
-            foreach (var d in resp.Devices)
+            foreach (var d in devices)
             {
                 var display = d.Description ?? d.Name;
                 var isInput = d.Type.Equals("source", StringComparison.OrdinalIgnoreCase);
@@ -418,6 +424,68 @@ public class MainViewModel : ReactiveObject
             keyOf: p => (p.ItemType, p.Identifier));
     }
 
+    /// <summary>
+    /// Builds a cheap fingerprint of the state snapshot so we can skip
+    /// the full reconciliation when nothing has changed.
+    /// </summary>
+    private static string BuildFingerprint(
+        DaemonStatus? status,
+        List<AudioGroup>? groups,
+        List<AudioStreamInfo>? streams,
+        List<AudioDeviceInfo>? devices)
+    {
+        // Use a simple DefaultInterpolatedStringHandler to avoid StringBuilder alloc.
+        // The fingerprint includes everything the UI renders.
+        var sb = new System.Text.StringBuilder(256);
+
+        if (status is not null)
+            sb.Append(status.ActiveStreams).Append(',')
+              .Append(status.ActiveDevices).Append(',')
+              .Append(status.ConfiguredGroups).Append(';');
+
+        if (groups is not null)
+        {
+            foreach (var g in groups)
+            {
+                sb.Append(g.Id).Append(':')
+                  .Append(g.Name).Append(':')
+                  .Append(g.Volume).Append(':')
+                  .Append(g.Muted).Append(':')
+                  .Append(g.IsDefault).Append(':')
+                  .Append(g.Color).Append(':')
+                  .Append(g.Programs.Count).Append(':')
+                  .Append(g.Devices.Count).Append('|');
+            }
+        }
+        sb.Append(';');
+
+        if (streams is not null)
+        {
+            foreach (var s in streams)
+            {
+                sb.Append(s.Id).Append(':')
+                  .Append(s.BinaryName).Append(':')
+                  .Append(s.AssignedGroup).Append(':')
+                  .Append(s.Volume).Append(':')
+                  .Append(s.Muted).Append('|');
+            }
+        }
+        sb.Append(';');
+
+        if (devices is not null)
+        {
+            foreach (var d in devices)
+            {
+                sb.Append(d.Name).Append(':')
+                  .Append(d.AssignedGroup).Append(':')
+                  .Append(d.Volume).Append(':')
+                  .Append(d.Muted).Append('|');
+            }
+        }
+
+        return sb.ToString();
+    }
+
     // ── Group actions ────────────────────────────────────────────────
 
     private async Task AddGroupAsync()
@@ -452,7 +520,7 @@ public class MainViewModel : ReactiveObject
 
     private async Task LoadShortcutBindingsAsync()
     {
-        var configManager = new ConfigManager();
+        using var configManager = new ConfigManager();
         try { await configManager.LoadAsync(); }
         catch { /* defaults */ }
 
@@ -480,7 +548,7 @@ public class MainViewModel : ReactiveObject
     /// </summary>
     public async Task SaveShortcutsAsync()
     {
-        var configManager = new ConfigManager();
+        using var configManager = new ConfigManager();
         try { await configManager.LoadAsync(); }
         catch { /* defaults */ }
 
@@ -763,9 +831,15 @@ public class GroupColumnViewModel : ReactiveObject
             this.RaiseAndSetIfChanged(ref _volume, value);
             this.RaisePropertyChanged(nameof(VolumeText));
 
-            _volumeDebounce?.Cancel();
-            _volumeDebounce = new CancellationTokenSource();
-            var ct = _volumeDebounce.Token;
+            var old = _volumeDebounce;
+            old?.Cancel();
+
+            var cts = new CancellationTokenSource();
+            _volumeDebounce = cts;
+            var ct = cts.Token;
+
+            old?.Dispose();
+
             var v = value;
             _ = DebounceVolumeAsync(v, ct);
         }

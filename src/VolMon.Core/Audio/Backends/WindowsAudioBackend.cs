@@ -257,18 +257,19 @@ public sealed class WindowsAudioBackend : IAudioBackend
     }
 
     /// <summary>
-    /// Finds a session by stream ID (PID string) across all tracked devices.
+    /// Finds a session by stream ID (PID string) across already-tracked devices.
+    /// Uses <see cref="_trackedDevices"/> to avoid re-enumerating all audio
+    /// endpoints on every volume/mute change.
     /// </summary>
     private AudioSessionControl? FindSession(string streamId)
     {
         if (!int.TryParse(streamId, out var targetPid)) return null;
-        if (_enumerator is null) return null;
 
-        foreach (var device in _enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+        foreach (var tracked in _trackedDevices.Values)
         {
             try
             {
-                var sessions = device.AudioSessionManager.Sessions;
+                var sessions = tracked.Device.AudioSessionManager.Sessions;
                 for (int i = 0; i < sessions.Count; i++)
                 {
                     try
@@ -403,12 +404,14 @@ public sealed class WindowsAudioBackend : IAudioBackend
                 var pid = (int)control.GetProcessID;
                 if (pid == 0) return;
 
+                var pidStr = pid.ToString();
+
                 // Register for session disconnect so we can fire StreamRemoved
                 control.RegisterEventClient(new SessionEventClient(backend, pid));
 
                 backend.StreamCreated?.Invoke(backend, new AudioStreamEventArgs
                 {
-                    StreamId = pid.ToString()
+                    StreamId = pidStr
                 });
             }
             catch { /* ignore notification errors */ }
@@ -421,6 +424,8 @@ public sealed class WindowsAudioBackend : IAudioBackend
     /// </summary>
     private sealed class SessionEventClient(WindowsAudioBackend backend, int pid) : IAudioSessionEventsHandler
     {
+        private readonly string _pidString = pid.ToString();
+
         public void OnVolumeChanged(float volume, bool isMuted) { }
         public void OnDisplayNameChanged(string displayName) { }
         public void OnIconPathChanged(string iconPath) { }
@@ -433,7 +438,7 @@ public sealed class WindowsAudioBackend : IAudioBackend
             {
                 backend.StreamRemoved?.Invoke(backend, new AudioStreamEventArgs
                 {
-                    StreamId = pid.ToString()
+                    StreamId = _pidString
                 });
             }
         }
@@ -442,7 +447,7 @@ public sealed class WindowsAudioBackend : IAudioBackend
         {
             backend.StreamRemoved?.Invoke(backend, new AudioStreamEventArgs
             {
-                StreamId = pid.ToString()
+                StreamId = _pidString
             });
         }
     }
@@ -514,6 +519,9 @@ public sealed class WindowsAudioBackend : IAudioBackend
         SessionCreatedHandler _handler) : IDisposable
 #pragma warning restore CS9113
     {
+        /// <summary>The underlying MMDevice (used for session lookups).</summary>
+        public MMDevice Device => device;
+
         public void Dispose()
         {
             // NAudio doesn't expose a way to unsubscribe OnSessionCreated,

@@ -65,11 +65,12 @@ public sealed class IpcDuplexServer : IDisposable
     /// <summary>
     /// Broadcasts an event to all connected clients. Clients that fail to
     /// receive the message are silently disconnected.
+    /// Serializes once to UTF-8 bytes to avoid an intermediate string allocation.
     /// </summary>
     public async Task BroadcastAsync(IpcEvent evt)
     {
         var message = IpcMessage.CreateEvent(evt);
-        var json = IpcSerializer.Serialize(message);
+        var utf8 = IpcSerializer.SerializeToUtf8Bytes(message);
 
         var disconnected = new List<string>();
 
@@ -77,7 +78,7 @@ public sealed class IpcDuplexServer : IDisposable
         {
             try
             {
-                await kvp.Value.WriteLineAsync(json);
+                await kvp.Value.WriteUtf8LineAsync(utf8);
             }
             catch
             {
@@ -248,6 +249,26 @@ public sealed class IpcDuplexServer : IDisposable
             try
             {
                 await _writer.WriteLineAsync(line.AsMemory());
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Writes pre-serialized UTF-8 bytes as a line to the pipe, avoiding
+        /// the intermediate string allocation on the broadcast hot path.
+        /// </summary>
+        public async Task WriteUtf8LineAsync(byte[] utf8)
+        {
+            await _writeLock.WaitAsync();
+            try
+            {
+                await _pipe.WriteAsync(utf8);
+                // WriteLineAsync appends \n via StreamWriter; replicate that here
+                _pipe.WriteByte((byte)'\n');
+                await _pipe.FlushAsync();
             }
             finally
             {

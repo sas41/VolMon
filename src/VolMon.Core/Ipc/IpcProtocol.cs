@@ -208,6 +208,12 @@ public static class IpcSerializer
     public static string Serialize<T>(T value) =>
         JsonSerializer.Serialize(value, Options);
 
+    /// <summary>
+    /// Serializes directly to UTF-8 bytes, avoiding the intermediate string allocation.
+    /// </summary>
+    public static byte[] SerializeToUtf8Bytes<T>(T value) =>
+        JsonSerializer.SerializeToUtf8Bytes(value, Options);
+
     public static T? Deserialize<T>(string json) =>
         JsonSerializer.Deserialize<T>(json, Options);
 }

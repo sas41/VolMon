@@ -84,7 +84,7 @@ public sealed class StreamWatcher : IDisposable
         }
 
         // Snapshot to avoid "collection was modified" if pactl events fire concurrently
-        var streams = _activeStreams.Values.Where(s => s.AssignedGroup == group.Id).ToList();
+        var streams = _activeStreams.Values.Where(s => s.AssignedGroup == group.Id).ToArray();
         foreach (var stream in streams)
         {
             try
@@ -101,7 +101,7 @@ public sealed class StreamWatcher : IDisposable
         }
 
         // Snapshot to avoid "collection was modified" if pactl events fire concurrently
-        var devices = _knownDevices.Values.Where(d => d.AssignedGroup == group.Id).ToList();
+        var devices = _knownDevices.Values.Where(d => d.AssignedGroup == group.Id).ToArray();
         foreach (var device in devices)
         {
             try
@@ -124,14 +124,14 @@ public sealed class StreamWatcher : IDisposable
     public async Task ReassignAllAsync(CancellationToken ct = default)
     {
         // Snapshot to avoid "collection was modified" if pactl events fire concurrently
-        foreach (var stream in _activeStreams.Values.ToList())
+        foreach (var stream in _activeStreams.Values.ToArray())
         {
             stream.AssignedGroup = null;
             AssignStreamToGroup(stream);
             await ApplyStreamSettingsAsync(stream, ct);
         }
 
-        foreach (var device in _knownDevices.Values.ToList())
+        foreach (var device in _knownDevices.Values.ToArray())
         {
             device.AssignedGroup = null;
             AssignDeviceToGroup(device);
@@ -323,9 +323,14 @@ public sealed class StreamWatcher : IDisposable
     /// </summary>
     private void RaiseStateChanged()
     {
-        _stateChangedDebounce?.Cancel();
-        _stateChangedDebounce = new CancellationTokenSource();
-        var ct = _stateChangedDebounce.Token;
+        var old = _stateChangedDebounce;
+        old?.Cancel();
+
+        var cts = new CancellationTokenSource();
+        _stateChangedDebounce = cts;
+        var ct = cts.Token;
+
+        old?.Dispose();
 
         _ = Task.Run(async () =>
         {

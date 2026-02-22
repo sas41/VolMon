@@ -10,11 +10,11 @@ builder.Services.AddSingleton<ConfigManager>();
 builder.Services.AddSingleton<IAudioBackend>(sp =>
 {
     if (OperatingSystem.IsLinux())
-        return new PulseAudioBackend();
+        return new LinuxPulseBackend();
     if (OperatingSystem.IsWindows())
         return new WindowsBackend();
     if (OperatingSystem.IsMacOS())
-        return new MacOsAudioBackend();
+        return new MacOsBackend();
 
     throw new PlatformNotSupportedException(
         $"No audio backend available for {Environment.OSVersion.Platform}");

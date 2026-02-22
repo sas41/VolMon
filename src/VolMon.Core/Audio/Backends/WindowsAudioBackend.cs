@@ -82,7 +82,7 @@ namespace VolMon.Core.Audio.Backends;
         RunOnStaAsync(() =>
         {
             volume = Math.Clamp(volume, 0, 100);
-            var session = FindSession(streamId);
+            var session = FindSession(streamId) ?? FindSessionFallback(streamId);
             if (session is not null)
                 session.SimpleAudioVolume.Volume = volume / 100f;
         });
@@ -91,7 +91,7 @@ namespace VolMon.Core.Audio.Backends;
     public Task SetStreamMuteAsync(string streamId, bool muted, CancellationToken ct = default) =>
         RunOnStaAsync(() =>
         {
-            var session = FindSession(streamId);
+            var session = FindSession(streamId) ?? FindSessionFallback(streamId);
             if (session is not null)
                 session.SimpleAudioVolume.Mute = muted;
         });
@@ -309,6 +309,57 @@ namespace VolMon.Core.Audio.Backends;
                 }
             }
             catch { /* skip */ }
+        }
+
+        return null;
+    }
+
+    // Fallback search across all endpoints to locate a session by PID
+    private AudioSessionControl? FindSessionFallback(string streamId)
+    {
+        if (!int.TryParse(streamId, out var targetPid)) return null;
+
+        // 1) Check already-tracked devices
+        foreach (var tracked in _trackedDevices.Values)
+        {
+            try
+            {
+                var sessions = tracked.Device.AudioSessionManager.Sessions;
+                for (int i = 0; i < sessions.Count; i++)
+                {
+                    try
+                    {
+                        var session = sessions[i];
+                        if ((int)session.GetProcessID == targetPid)
+                            return session;
+                    }
+                    catch { /* skip */ }
+                }
+            }
+            catch { /* skip */ }
+        }
+
+        // 2) Scan active render devices
+        if (_enumerator != null)
+        {
+            foreach (var device in _enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+            {
+                try
+                {
+                    var sessions = device.AudioSessionManager.Sessions;
+                    for (int i = 0; i < sessions.Count; i++)
+                    {
+                        try
+                        {
+                            var session = sessions[i];
+                            if ((int)session.GetProcessID == targetPid)
+                                return session;
+                        }
+                        catch { /* skip */ }
+                    }
+                }
+                catch { /* skip device without session */ }
+            }
         }
 
         return null;

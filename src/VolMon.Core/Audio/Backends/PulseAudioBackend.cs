@@ -1,96 +1,377 @@
-using System.Collections.Concurrent;
-using System.Diagnostics;
-using System.Globalization;
-using System.Text.RegularExpressions;
+using System.Runtime.InteropServices;
+using static VolMon.Core.Audio.Backends.LibPulse;
 
 namespace VolMon.Core.Audio.Backends;
 
 /// <summary>
-/// Linux audio backend using pactl (works with both PulseAudio and PipeWire).
-/// Spawns CLI processes and parses their output — no native library bindings needed.
+/// Linux audio backend using libpulse P/Invoke (works with both PulseAudio and PipeWire).
+/// Maintains a persistent connection via <c>pa_threaded_mainloop</c> and communicates over
+/// PulseAudio's native Unix-socket protocol — no process spawning or text parsing.
 /// </summary>
-public sealed partial class PulseAudioBackend : IAudioBackend
+/// <remarks>
+/// Threading model:
+/// <list type="bullet">
+///   <item><c>pa_threaded_mainloop</c> runs its own background thread that drives all PA I/O.</item>
+///   <item>All PA API calls from external threads must be wrapped in lock/unlock.</item>
+///   <item>Callbacks from PA fire on the mainloop thread <b>with the lock already held</b> —
+///         they must never call lock() again (assertion failure) and must not block.</item>
+///   <item>Query methods (Get*Async) use the lock → issue op → wait → signal → unlock pattern
+///         so the result is ready when the method returns.</item>
+///   <item>Subscription callbacks dispatch events to the thread pool to avoid re-entrant
+///         deadlocks when event handlers call back into the backend.</item>
+/// </list>
+/// </remarks>
+public sealed class PulseAudioBackend : IAudioBackend
 {
-    private Process? _subscribeProcess;
-    private CancellationTokenSource? _monitorCts;
-    private Task? _monitorTask;
+    private IntPtr _mainloop;
+    private IntPtr _api;
+    private IntPtr _context;
+    private volatile bool _ready;
+    private volatile bool _disposed;
 
-    /// <summary>Cache for dynamically-built property regex patterns.</summary>
-    private static readonly ConcurrentDictionary<string, Regex> PropertyRegexCache = new();
+    // Prevent GC collection of delegates passed to native code.
+    // These must live as long as the context/mainloop they are registered with.
+    private pa_context_notify_cb_t? _stateCallback;
+    private pa_context_subscribe_cb_t? _subscribeCallback;
 
     public event EventHandler<AudioStreamEventArgs>? StreamCreated;
     public event EventHandler<AudioStreamEventArgs>? StreamRemoved;
     public event EventHandler<AudioStreamEventArgs>? StreamChanged;
     public event EventHandler<AudioDeviceEventArgs>? DeviceChanged;
 
+    // ── Connection lifecycle ─────────────────────────────────────────
+
+    /// <summary>
+    /// Connects to PulseAudio (or PipeWire-pulse) using the default server socket.
+    /// Blocks until the context reaches READY or fails.
+    /// </summary>
+    private void EnsureConnected()
+    {
+        if (_ready) return;
+
+        _mainloop = pa_threaded_mainloop_new();
+        if (_mainloop == IntPtr.Zero)
+            throw new InvalidOperationException("Failed to create pa_threaded_mainloop.");
+
+        _api = pa_threaded_mainloop_get_api(_mainloop);
+
+        var proplist = pa_proplist_new();
+        pa_proplist_sets(proplist, "application.name", "VolMon");
+        pa_proplist_sets(proplist, "application.id", "com.volmon.daemon");
+        pa_proplist_sets(proplist, "application.icon_name", "audio-card");
+
+        _context = pa_context_new_with_proplist(_api, null, proplist);
+        pa_proplist_free(proplist);
+
+        if (_context == IntPtr.Zero)
+            throw new InvalidOperationException("Failed to create pa_context.");
+
+        _stateCallback = OnContextState;
+        pa_context_set_state_callback(_context, _stateCallback, IntPtr.Zero);
+
+        if (pa_context_connect(_context, null, pa_context_flags_t.NoFail, IntPtr.Zero) < 0)
+            throw new InvalidOperationException(
+                $"pa_context_connect failed: {GetError()}");
+
+        if (pa_threaded_mainloop_start(_mainloop) < 0)
+            throw new InvalidOperationException("Failed to start pa_threaded_mainloop.");
+
+        // Wait for the context to become ready (or fail).
+        pa_threaded_mainloop_lock(_mainloop);
+        try
+        {
+            while (true)
+            {
+                var state = pa_context_get_state(_context);
+                if (state == pa_context_state_t.Ready)
+                {
+                    _ready = true;
+                    break;
+                }
+                if (state is pa_context_state_t.Failed or pa_context_state_t.Terminated)
+                {
+                    throw new InvalidOperationException(
+                        $"PulseAudio connection failed (state={state}): {GetError()}");
+                }
+
+                pa_threaded_mainloop_wait(_mainloop);
+            }
+        }
+        finally
+        {
+            pa_threaded_mainloop_unlock(_mainloop);
+        }
+    }
+
+    /// <summary>
+    /// State callback — runs on the mainloop thread (lock already held).
+    /// Just signals the waiting thread; never locks.
+    /// </summary>
+    private void OnContextState(IntPtr context, IntPtr userdata)
+    {
+        pa_threaded_mainloop_signal(_mainloop, 0);
+    }
+
+    private string GetError()
+    {
+        if (_context == IntPtr.Zero) return "no context";
+        var errno = pa_context_errno(_context);
+        var ptr = pa_strerror(errno);
+        return PtrToStringUtf8(ptr) ?? $"error {errno}";
+    }
+
     // ── Streams ──────────────────────────────────────────────────────
 
     /// <inheritdoc/>
-    public async Task<IReadOnlyList<AudioStream>> GetStreamsAsync(CancellationToken ct = default)
+    public Task<IReadOnlyList<AudioStream>> GetStreamsAsync(CancellationToken ct = default)
     {
-        var output = await RunPactlAsync("list sink-inputs", ct);
-        return ParseSinkInputs(output);
+        EnsureConnected();
+        var streams = new List<AudioStream>();
+
+        // Callback runs on mainloop thread (lock already held) — collect data, then signal.
+        pa_sink_input_info_cb_t cb = (_, infoPtr, eol, _) =>
+        {
+            if (eol > 0)
+            {
+                pa_threaded_mainloop_signal(_mainloop, 0);
+                return;
+            }
+            if (infoPtr == IntPtr.Zero) return;
+
+            var info = Marshal.PtrToStructure<pa_sink_input_info>(infoPtr);
+            var proplist = info.proplist;
+
+            var appName = proplist != IntPtr.Zero
+                ? PtrToStringUtf8(pa_proplist_gets(proplist, "application.name"))
+                : null;
+            var pidStr = proplist != IntPtr.Zero
+                ? PtrToStringUtf8(pa_proplist_gets(proplist, "application.process.id"))
+                : null;
+            int? pid = pidStr is not null && int.TryParse(pidStr, out var p) ? p : null;
+
+            var binaryName = ResolveProcessBinary(pid)
+                ?? (proplist != IntPtr.Zero
+                    ? PtrToStringUtf8(pa_proplist_gets(proplist, "application.process.binary"))
+                    : null)
+                ?? appName
+                ?? "unknown";
+
+            streams.Add(new AudioStream
+            {
+                Id = info.index.ToString(),
+                BinaryName = binaryName,
+                ApplicationClass = appName,
+                Volume = CvolumeToPercent(ref info.volume),
+                Muted = info.mute != 0,
+                ProcessId = pid
+            });
+        };
+
+        // Lock → issue → wait (callback signals when eol) → unlock.
+        pa_threaded_mainloop_lock(_mainloop);
+        try
+        {
+            var op = pa_context_get_sink_input_info_list(_context, cb, IntPtr.Zero);
+            if (op == IntPtr.Zero)
+                throw new InvalidOperationException($"pa_context_get_sink_input_info_list failed: {GetError()}");
+
+            while (pa_operation_get_state(op) == pa_operation_state_t.Running)
+                pa_threaded_mainloop_wait(_mainloop);
+
+            pa_operation_unref(op);
+        }
+        finally
+        {
+            pa_threaded_mainloop_unlock(_mainloop);
+        }
+
+        // GC.KeepAlive ensures the delegate isn't collected before the native side is done.
+        GC.KeepAlive(cb);
+        return Task.FromResult<IReadOnlyList<AudioStream>>(streams);
     }
 
     /// <inheritdoc/>
-    public async Task SetStreamVolumeAsync(string streamId, int volume, CancellationToken ct = default)
+    public Task SetStreamVolumeAsync(string streamId, int volume, CancellationToken ct = default)
     {
-        volume = Math.Clamp(volume, 0, 100);
-        await RunPactlAsync($"set-sink-input-volume {streamId} {volume}%", ct);
+        EnsureConnected();
+        if (!uint.TryParse(streamId, out var idx))
+            throw new ArgumentException($"Invalid stream ID: {streamId}", nameof(streamId));
+
+        var cvol = PercentToCvolume(2, volume);
+
+        pa_threaded_mainloop_lock(_mainloop);
+        try
+        {
+            var op = pa_context_set_sink_input_volume(_context, idx, ref cvol, null, IntPtr.Zero);
+            if (op != IntPtr.Zero) pa_operation_unref(op);
+        }
+        finally
+        {
+            pa_threaded_mainloop_unlock(_mainloop);
+        }
+
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc/>
-    public async Task SetStreamMuteAsync(string streamId, bool muted, CancellationToken ct = default)
+    public Task SetStreamMuteAsync(string streamId, bool muted, CancellationToken ct = default)
     {
-        var muteStr = muted ? "1" : "0";
-        await RunPactlAsync($"set-sink-input-mute {streamId} {muteStr}", ct);
+        EnsureConnected();
+        if (!uint.TryParse(streamId, out var idx))
+            throw new ArgumentException($"Invalid stream ID: {streamId}", nameof(streamId));
+
+        pa_threaded_mainloop_lock(_mainloop);
+        try
+        {
+            var op = pa_context_set_sink_input_mute(_context, idx, muted ? 1 : 0, null, IntPtr.Zero);
+            if (op != IntPtr.Zero) pa_operation_unref(op);
+        }
+        finally
+        {
+            pa_threaded_mainloop_unlock(_mainloop);
+        }
+
+        return Task.CompletedTask;
     }
 
     // ── Devices ──────────────────────────────────────────────────────
 
     /// <inheritdoc/>
-    public async Task<IReadOnlyList<AudioDevice>> GetDevicesAsync(CancellationToken ct = default)
+    public Task<IReadOnlyList<AudioDevice>> GetDevicesAsync(CancellationToken ct = default)
     {
+        EnsureConnected();
         var devices = new List<AudioDevice>();
+        int pendingLists = 2; // sinks + sources
 
-        var sinksOutput = await RunPactlAsync("list sinks", ct);
-        devices.AddRange(ParseDevices(sinksOutput, DeviceType.Sink));
+        pa_sink_info_cb_t sinkCb = (_, infoPtr, eol, _) =>
+        {
+            if (eol > 0)
+            {
+                if (Interlocked.Decrement(ref pendingLists) == 0)
+                    pa_threaded_mainloop_signal(_mainloop, 0);
+                return;
+            }
+            if (infoPtr == IntPtr.Zero) return;
 
-        var sourcesOutput = await RunPactlAsync("list sources", ct);
-        devices.AddRange(ParseDevices(sourcesOutput, DeviceType.Source));
+            var info = Marshal.PtrToStructure<pa_sink_info>(infoPtr);
+            devices.Add(new AudioDevice
+            {
+                Id = info.index.ToString(),
+                Name = PtrToStringUtf8(info.name) ?? "",
+                Description = PtrToStringUtf8(info.description),
+                Type = DeviceType.Sink,
+                Volume = CvolumeToPercent(ref info.volume),
+                Muted = info.mute != 0
+            });
+        };
 
-        return devices;
+        pa_source_info_cb_t sourceCb = (_, infoPtr, eol, _) =>
+        {
+            if (eol > 0)
+            {
+                if (Interlocked.Decrement(ref pendingLists) == 0)
+                    pa_threaded_mainloop_signal(_mainloop, 0);
+                return;
+            }
+            if (infoPtr == IntPtr.Zero) return;
+
+            var info = Marshal.PtrToStructure<pa_source_info>(infoPtr);
+            var name = PtrToStringUtf8(info.name) ?? "";
+
+            // Skip monitor sources (they mirror sinks, not real hardware).
+            if (name.Contains(".monitor")) return;
+
+            devices.Add(new AudioDevice
+            {
+                Id = info.index.ToString(),
+                Name = name,
+                Description = PtrToStringUtf8(info.description),
+                Type = DeviceType.Source,
+                Volume = CvolumeToPercent(ref info.volume),
+                Muted = info.mute != 0
+            });
+        };
+
+        pa_threaded_mainloop_lock(_mainloop);
+        try
+        {
+            var op1 = pa_context_get_sink_info_list(_context, sinkCb, IntPtr.Zero);
+            if (op1 == IntPtr.Zero)
+                throw new InvalidOperationException($"pa_context_get_sink_info_list failed: {GetError()}");
+
+            var op2 = pa_context_get_source_info_list(_context, sourceCb, IntPtr.Zero);
+            if (op2 == IntPtr.Zero)
+            {
+                pa_operation_unref(op1);
+                throw new InvalidOperationException($"pa_context_get_source_info_list failed: {GetError()}");
+            }
+
+            // Wait until both sink and source lists have delivered their eol.
+            while (pa_operation_get_state(op1) == pa_operation_state_t.Running ||
+                   pa_operation_get_state(op2) == pa_operation_state_t.Running)
+            {
+                pa_threaded_mainloop_wait(_mainloop);
+            }
+
+            pa_operation_unref(op1);
+            pa_operation_unref(op2);
+        }
+        finally
+        {
+            pa_threaded_mainloop_unlock(_mainloop);
+        }
+
+        GC.KeepAlive(sinkCb);
+        GC.KeepAlive(sourceCb);
+        return Task.FromResult<IReadOnlyList<AudioDevice>>(devices);
     }
 
     /// <inheritdoc/>
-    public async Task SetDeviceVolumeAsync(string deviceName, int volume, CancellationToken ct = default)
+    public Task SetDeviceVolumeAsync(string deviceName, int volume, CancellationToken ct = default)
     {
-        volume = Math.Clamp(volume, 0, 100);
+        EnsureConnected();
+        var cvol = PercentToCvolume(2, volume);
 
-        // Try as sink first, then as source. One will succeed.
+        pa_threaded_mainloop_lock(_mainloop);
         try
         {
-            await RunPactlAsync($"set-sink-volume {EscapeArg(deviceName)} {volume}%", ct);
-            return;
-        }
-        catch { /* not a sink, try source */ }
+            // Fire both sink and source — the one that doesn't match the name simply
+            // fails silently (no exception; the success callback is null).
+            var op1 = pa_context_set_sink_volume_by_name(_context, deviceName, ref cvol, null, IntPtr.Zero);
+            if (op1 != IntPtr.Zero) pa_operation_unref(op1);
 
-        await RunPactlAsync($"set-source-volume {EscapeArg(deviceName)} {volume}%", ct);
+            var op2 = pa_context_set_source_volume_by_name(_context, deviceName, ref cvol, null, IntPtr.Zero);
+            if (op2 != IntPtr.Zero) pa_operation_unref(op2);
+        }
+        finally
+        {
+            pa_threaded_mainloop_unlock(_mainloop);
+        }
+
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc/>
-    public async Task SetDeviceMuteAsync(string deviceName, bool muted, CancellationToken ct = default)
+    public Task SetDeviceMuteAsync(string deviceName, bool muted, CancellationToken ct = default)
     {
-        var muteStr = muted ? "1" : "0";
+        EnsureConnected();
+        var m = muted ? 1 : 0;
 
+        pa_threaded_mainloop_lock(_mainloop);
         try
         {
-            await RunPactlAsync($"set-sink-mute {EscapeArg(deviceName)} {muteStr}", ct);
-            return;
-        }
-        catch { /* not a sink, try source */ }
+            var op1 = pa_context_set_sink_mute_by_name(_context, deviceName, m, null, IntPtr.Zero);
+            if (op1 != IntPtr.Zero) pa_operation_unref(op1);
 
-        await RunPactlAsync($"set-source-mute {EscapeArg(deviceName)} {muteStr}", ct);
+            var op2 = pa_context_set_source_mute_by_name(_context, deviceName, m, null, IntPtr.Zero);
+            if (op2 != IntPtr.Zero) pa_operation_unref(op2);
+        }
+        finally
+        {
+            pa_threaded_mainloop_unlock(_mainloop);
+        }
+
+        return Task.CompletedTask;
     }
 
     // ── Monitoring ───────────────────────────────────────────────────
@@ -98,179 +379,126 @@ public sealed partial class PulseAudioBackend : IAudioBackend
     /// <inheritdoc/>
     public Task StartMonitoringAsync(CancellationToken ct = default)
     {
-        _monitorCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _monitorTask = MonitorLoopAsync(_monitorCts.Token);
+        EnsureConnected();
+
+        _subscribeCallback = OnSubscriptionEvent;
+
+        pa_threaded_mainloop_lock(_mainloop);
+        try
+        {
+            pa_context_set_subscribe_callback(_context, _subscribeCallback, IntPtr.Zero);
+
+            var mask = pa_subscription_mask_t.Sink
+                     | pa_subscription_mask_t.Source
+                     | pa_subscription_mask_t.SinkInput
+                     | pa_subscription_mask_t.SourceOutput;
+
+            var op = pa_context_subscribe(_context, mask, null, IntPtr.Zero);
+            if (op != IntPtr.Zero) pa_operation_unref(op);
+        }
+        finally
+        {
+            pa_threaded_mainloop_unlock(_mainloop);
+        }
+
         return Task.CompletedTask;
     }
 
     /// <inheritdoc/>
-    public async Task StopMonitoringAsync()
+    public Task StopMonitoringAsync()
     {
-        _monitorCts?.Cancel();
-
-        if (_subscribeProcess is { HasExited: false })
+        if (_context != IntPtr.Zero && _ready)
         {
-            try { _subscribeProcess.Kill(); }
-            catch { /* already exited */ }
-        }
-
-        if (_monitorTask is not null)
-        {
-            try { await _monitorTask; }
-            catch (OperationCanceledException) { }
-        }
-    }
-
-    // ── Private: monitoring loop ─────────────────────────────────────
-
-    private async Task MonitorLoopAsync(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
+            pa_threaded_mainloop_lock(_mainloop);
             try
             {
-                _subscribeProcess = new Process
-                {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = "pactl",
-                        Arguments = "subscribe",
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
-                };
-
-                _subscribeProcess.Start();
-
-                using var reader = _subscribeProcess.StandardOutput;
-                while (!ct.IsCancellationRequested)
-                {
-                    var line = await reader.ReadLineAsync(ct);
-                    if (line is null) break;
-
-                    ProcessSubscribeEvent(line);
-                }
+                pa_context_set_subscribe_callback(_context, null, IntPtr.Zero);
+                var op = pa_context_subscribe(_context, pa_subscription_mask_t.Null, null, IntPtr.Zero);
+                if (op != IntPtr.Zero) pa_operation_unref(op);
             }
-            catch (OperationCanceledException)
+            finally
             {
-                break;
-            }
-            catch
-            {
-                // pactl subscribe crashed or disconnected; retry after delay
-                await Task.Delay(1000, ct);
+                pa_threaded_mainloop_unlock(_mainloop);
             }
         }
+
+        return Task.CompletedTask;
     }
 
     /// <summary>
-    /// Parses a single line from `pactl subscribe` output.
-    /// Examples:
-    ///   Event 'new' on sink-input #42
-    ///   Event 'remove' on sink-input #42
-    ///   Event 'change' on sink #0
-    ///   Event 'new' on source #3
+    /// Subscription callback — runs on the mainloop thread (lock already held).
+    /// <b>Must not</b> call lock/unlock or block. Dispatches events to the thread pool
+    /// so that event handlers can safely call back into the backend (e.g. GetStreamsAsync)
+    /// without causing a re-entrant deadlock on the mainloop lock.
     /// </summary>
-    private void ProcessSubscribeEvent(string line)
+    private void OnSubscriptionEvent(
+        IntPtr context, pa_subscription_event_type_t type, uint idx, IntPtr userdata)
     {
-        var match = SubscribeEventRegex().Match(line);
-        if (!match.Success) return;
+        var facility = type & pa_subscription_event_type_t.FacilityMask;
+        var eventKind = type & pa_subscription_event_type_t.TypeMask;
+        var idStr = idx.ToString();
 
-        var eventType = match.Groups["event"].Value;
-        var objectType = match.Groups["type"].Value;
-        var id = match.Groups["id"].Value;
-
-        switch (objectType)
+        switch (facility)
         {
-            case "sink-input":
-                var streamArgs = new AudioStreamEventArgs { StreamId = id };
-                switch (eventType)
+            case pa_subscription_event_type_t.SinkInput:
+            {
+                var args = new AudioStreamEventArgs { StreamId = idStr };
+                switch (eventKind)
                 {
-                    case "new": StreamCreated?.Invoke(this, streamArgs); break;
-                    case "remove": StreamRemoved?.Invoke(this, streamArgs); break;
-                    case "change": StreamChanged?.Invoke(this, streamArgs); break;
+                    case pa_subscription_event_type_t.New:
+                        ThreadPool.QueueUserWorkItem(_ => StreamCreated?.Invoke(this, args));
+                        break;
+                    case pa_subscription_event_type_t.Remove:
+                        ThreadPool.QueueUserWorkItem(_ => StreamRemoved?.Invoke(this, args));
+                        break;
+                    case pa_subscription_event_type_t.Change:
+                        ThreadPool.QueueUserWorkItem(_ => StreamChanged?.Invoke(this, args));
+                        break;
                 }
                 break;
+            }
 
-            case "sink" or "source":
-                // For device events we pass the ID; the watcher will resolve the name
-                var devEventType = eventType switch
-                {
-                    "new" => AudioDeviceEventType.Added,
-                    "remove" => AudioDeviceEventType.Removed,
-                    _ => AudioDeviceEventType.Changed
-                };
-                DeviceChanged?.Invoke(this, new AudioDeviceEventArgs
-                {
-                    DeviceName = id, // numeric index; watcher resolves to name
-                    EventType = devEventType
-                });
-                break;
-        }
-    }
-
-    // ── Private: parsing ─────────────────────────────────────────────
-
-    private static List<AudioStream> ParseSinkInputs(string output)
-    {
-        var streams = new List<AudioStream>();
-        var blocks = output.Split("Sink Input #", StringSplitOptions.RemoveEmptyEntries);
-
-        foreach (var block in blocks)
-        {
-            var idMatch = LeadingDigitsRegex().Match(block);
-            if (!idMatch.Success) continue;
-
-            var id = idMatch.Groups[1].Value;
-            var volume = ParseVolume(block);
-            var muted = ParseMuted(block);
-            var appClass = ParseProperty(block, "application.name");
-            var pidStr = ParseProperty(block, "application.process.id");
-            int? pid = pidStr is not null && int.TryParse(pidStr, out var p) ? p : null;
-
-            // Resolve binary name: /proc/<pid>/exe is ground truth from the kernel,
-            // then fall back to PulseAudio properties, then application.name.
-            var binaryName = ResolveProcessBinary(pid)
-                ?? ParseProperty(block, "application.process.binary")
-                ?? appClass
-                ?? "unknown";
-
-            streams.Add(new AudioStream
+            case pa_subscription_event_type_t.Sink:
+            case pa_subscription_event_type_t.Source:
             {
-                Id = id,
-                BinaryName = binaryName,
-                ApplicationClass = appClass,
-                Volume = volume,
-                Muted = muted,
-                ProcessId = pid
-            });
+                var devEventType = eventKind switch
+                {
+                    pa_subscription_event_type_t.New    => AudioDeviceEventType.Added,
+                    pa_subscription_event_type_t.Remove => AudioDeviceEventType.Removed,
+                    _                                   => AudioDeviceEventType.Changed
+                };
+                var args = new AudioDeviceEventArgs
+                {
+                    DeviceName = idStr,
+                    EventType = devEventType
+                };
+                ThreadPool.QueueUserWorkItem(_ => DeviceChanged?.Invoke(this, args));
+                break;
+            }
         }
-
-        return streams;
     }
+
+    // ── Process resolution ───────────────────────────────────────────
 
     /// <summary>
-    /// Resolves the actual executable name from /proc/&lt;pid&gt;/exe.
+    /// Resolves the actual executable name from /proc/&lt;pid&gt;/comm (then /proc/&lt;pid&gt;/exe).
     /// Returns just the filename (e.g. "firefox"), not the full path.
-    /// Returns null if the PID is unavailable or the symlink can't be read.
     /// </summary>
     private static string? ResolveProcessBinary(int? pid)
     {
         if (pid is null) return null;
         try
         {
-            var exePath = File.ReadAllText($"/proc/{pid}/comm").Trim();
-            if (!string.IsNullOrEmpty(exePath))
-                return exePath;
+            var comm = File.ReadAllText($"/proc/{pid}/comm").Trim();
+            if (!string.IsNullOrEmpty(comm))
+                return comm;
         }
         catch { /* process may have exited, or permission denied */ }
 
         try
         {
-            // /proc/<pid>/exe is a symlink to the actual binary
-            var target = Path.GetFileName(File.ResolveLinkTarget($"/proc/{pid}/exe", true)?.FullName ?? "");
+            var target = Path.GetFileName(
+                File.ResolveLinkTarget($"/proc/{pid}/exe", true)?.FullName ?? "");
             if (!string.IsNullOrEmpty(target))
                 return target;
         }
@@ -279,136 +507,34 @@ public sealed partial class PulseAudioBackend : IAudioBackend
         return null;
     }
 
-    private static List<AudioDevice> ParseDevices(string output, DeviceType type)
-    {
-        var devices = new List<AudioDevice>();
-        var splitToken = type == DeviceType.Sink ? "Sink #" : "Source #";
-        var blocks = output.Split(splitToken, StringSplitOptions.RemoveEmptyEntries);
-
-        foreach (var block in blocks)
-        {
-            var idMatch = LeadingDigitsRegex().Match(block);
-            if (!idMatch.Success) continue;
-
-            var id = idMatch.Groups[1].Value;
-
-            // Name is on a line like "	Name: alsa_output.pci-0000_00_1f.3.analog-stereo"
-            var nameMatch = DeviceNameRegex().Match(block);
-            if (!nameMatch.Success) continue;
-            var name = nameMatch.Groups[1].Value.Trim();
-
-            // Skip monitor sources (they mirror sinks, not real hardware)
-            if (type == DeviceType.Source && name.Contains(".monitor"))
-                continue;
-
-            var descMatch = DeviceDescriptionRegex().Match(block);
-            var description = descMatch.Success ? descMatch.Groups[1].Value.Trim() : null;
-
-            var volume = ParseVolume(block);
-            var muted = ParseMuted(block);
-
-            devices.Add(new AudioDevice
-            {
-                Id = id,
-                Name = name,
-                Description = description,
-                Type = type,
-                Volume = volume,
-                Muted = muted
-            });
-        }
-
-        return devices;
-    }
-
-    private static int ParseVolume(string block)
-    {
-        var match = VolumeRegex().Match(block);
-        if (match.Success && int.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var vol))
-            return vol;
-        return 100;
-    }
-
-    private static bool ParseMuted(string block)
-    {
-        var match = MuteRegex().Match(block);
-        return match.Success && match.Groups[1].Value.Equals("yes", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string? ParseProperty(string block, string propertyName)
-    {
-        var regex = PropertyRegexCache.GetOrAdd(propertyName, static name =>
-            new Regex($@"{Regex.Escape(name)}\s*=\s*""([^""]*)""", RegexOptions.Compiled));
-        var match = regex.Match(block);
-        return match.Success ? match.Groups[1].Value : null;
-    }
-
-    // ── Private: helpers ─────────────────────────────────────────────
-
-    /// <summary>
-    /// Quotes a pactl argument that may contain special characters (device names).
-    /// </summary>
-    private static string EscapeArg(string arg) =>
-        arg.Contains(' ') ? $"\"{arg}\"" : arg;
-
-    private static async Task<string> RunPactlAsync(string arguments, CancellationToken ct)
-    {
-        using var process = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = "pactl",
-                Arguments = arguments,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-
-        process.Start();
-        var output = await process.StandardOutput.ReadToEndAsync(ct);
-        await process.WaitForExitAsync(ct);
-
-        if (process.ExitCode != 0)
-        {
-            var error = await process.StandardError.ReadToEndAsync(ct);
-            throw new InvalidOperationException(
-                $"pactl {arguments} failed (exit {process.ExitCode}): {error.Trim()}");
-        }
-
-        return output;
-    }
+    // ── Dispose ──────────────────────────────────────────────────────
 
     public void Dispose()
     {
-        _monitorCts?.Cancel();
-        _monitorCts?.Dispose();
+        if (_disposed) return;
+        _disposed = true;
+        _ready = false;
 
-        if (_subscribeProcess is { HasExited: false })
+        if (_mainloop != IntPtr.Zero)
         {
-            try { _subscribeProcess.Kill(); }
-            catch { /* already exited */ }
+            pa_threaded_mainloop_stop(_mainloop);
         }
 
-        _subscribeProcess?.Dispose();
+        if (_context != IntPtr.Zero)
+        {
+            pa_context_disconnect(_context);
+            pa_context_unref(_context);
+            _context = IntPtr.Zero;
+        }
+
+        if (_mainloop != IntPtr.Zero)
+        {
+            pa_threaded_mainloop_free(_mainloop);
+            _mainloop = IntPtr.Zero;
+        }
+
+        // Release delegate references.
+        _stateCallback = null;
+        _subscribeCallback = null;
     }
-
-    [GeneratedRegex(@"Event '(?<event>\w+)' on (?<type>[\w-]+) #(?<id>\d+)")]
-    private static partial Regex SubscribeEventRegex();
-
-    [GeneratedRegex(@"^(\d+)")]
-    private static partial Regex LeadingDigitsRegex();
-
-    [GeneratedRegex(@"^\s*Name:\s*(.+)$", RegexOptions.Multiline)]
-    private static partial Regex DeviceNameRegex();
-
-    [GeneratedRegex(@"^\s*Description:\s*(.+)$", RegexOptions.Multiline)]
-    private static partial Regex DeviceDescriptionRegex();
-
-    [GeneratedRegex(@"Volume:.*?(\d+)%")]
-    private static partial Regex VolumeRegex();
-
-    [GeneratedRegex(@"Mute:\s*(yes|no)", RegexOptions.IgnoreCase)]
-    private static partial Regex MuteRegex();
 }

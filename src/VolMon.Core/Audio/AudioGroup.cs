@@ -54,11 +54,23 @@ public sealed class AudioGroup
     public List<string> Devices { get; set; } = [];
 
     /// <summary>
-    /// Tests whether the given stream's binary name is in this group's program list.
+    /// Tests whether the given stream is in this group's program list.
     /// </summary>
     public bool ContainsProgram(AudioStream stream) =>
         Programs.Any(p => p.Equals(stream.BinaryName, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Tests whether the given stream binary name is in this group's program list.
+    /// </summary>
+    public bool ContainsProgram(string streamBinaryName) =>
+        Programs.Any(p => p.Equals(streamBinaryName, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Tests whether the given device is in this group's device list.
+    /// </summary>
+    public bool ContainsDevice(AudioDevice device) =>
+
+        Devices.Any(d => d.Equals(device.Name, StringComparison.OrdinalIgnoreCase));
     /// <summary>
     /// Tests whether the given device name is in this group's device list.
     /// </summary>

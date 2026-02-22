@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using System.Collections.Generic;
+using VolMon.Core.Audio;
 using static VolMon.Core.Audio.Backends.LibPulse;
 
 namespace VolMon.Core.Audio.Backends;
@@ -54,6 +56,9 @@ public sealed class PulseAudioBackend : IAudioBackend
     public event EventHandler<AudioStreamEventArgs>? StreamRemoved;
     public event EventHandler<AudioStreamEventArgs>? StreamChanged;
     public event EventHandler<AudioDeviceEventArgs>? DeviceChanged;
+
+    public Task<IReadOnlyList<AudioProcess>> GetProcessesAsync(CancellationToken ct = default) =>
+        Task.FromResult((IReadOnlyList<AudioProcess>)new List<AudioProcess>());
 
     // ── Connection lifecycle ─────────────────────────────────────────
 

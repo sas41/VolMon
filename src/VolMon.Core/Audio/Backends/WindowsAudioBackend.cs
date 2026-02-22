@@ -1,4 +1,7 @@
-using System.Diagnostics;
+ using System.Diagnostics;
+using VolMon.Core.Audio;
+using System.Linq;
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using NAudio.CoreAudioApi;
@@ -16,7 +19,7 @@ namespace VolMon.Core.Audio.Backends;
 /// All public methods marshal work to this thread via a task queue.
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class WindowsAudioBackend : IAudioBackend
+ public sealed class WindowsBackend : IAudioBackend
 {
     private Thread? _staThread;
     private BlockingTaskQueue? _queue;
@@ -28,6 +31,11 @@ public sealed class WindowsAudioBackend : IAudioBackend
 
     // Track sessions per device for event cleanup
     private readonly Dictionary<string, TrackedDevice> _trackedDevices = new();
+    // Track live process watchers to cleanup streams when the associated
+    // process exits, even if session notifications are missed.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, System.Diagnostics.Process> _processWatchers = new();
+    // Track processes and their streams for GUI consumption
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, AudioProcess> _processes = new();
 
     public event EventHandler<AudioStreamEventArgs>? StreamCreated;
     public event EventHandler<AudioStreamEventArgs>? StreamRemoved;
@@ -256,6 +264,25 @@ public sealed class WindowsAudioBackend : IAudioBackend
         }
     }
 
+    // Ensure a per-process AudioProcess entry exists
+    private AudioProcess EnsureProcess(int pid)
+    {
+        return _processes.GetOrAdd(pid, p => new AudioProcess
+        {
+            Id = p,
+            Name = ResolveProcessName(p) ?? "unknown",
+            Streams = new List<AudioStream>()
+        });
+    }
+
+    // Expose a list of processes with their streams
+    public Task<IReadOnlyList<AudioProcess>> GetProcessesAsync(CancellationToken ct = default) =>
+        RunOnStaAsync<IReadOnlyList<AudioProcess>>(() =>
+        {
+            var list = _processes.Values.ToList<AudioProcess>();
+            return (IReadOnlyList<AudioProcess>)list;
+        });
+
     /// <summary>
     /// Finds a session by stream ID (PID string) across already-tracked devices.
     /// Uses <see cref="_trackedDevices"/> to avoid re-enumerating all audio
@@ -393,7 +420,7 @@ public sealed class WindowsAudioBackend : IAudioBackend
     /// Handles new session notifications from the audio session manager.
     /// </summary>
 #pragma warning disable CS9113 // deviceId kept for future diagnostics
-    private sealed class SessionCreatedHandler(WindowsAudioBackend backend, string _deviceId)
+    private sealed class SessionCreatedHandler(WindowsBackend backend, string _deviceId)
 #pragma warning restore CS9113
     {
         public void OnSessionCreated(object sender, IAudioSessionControl newSession)
@@ -409,9 +436,37 @@ public sealed class WindowsAudioBackend : IAudioBackend
                 // Register for session disconnect so we can fire StreamRemoved
                 control.RegisterEventClient(new SessionEventClient(backend, pid));
 
+                // Ensure per-process entry exists and attach stream if available
+                var procModel = backend.EnsureProcess(pid);
+                // Watch the corresponding OS process and remove the stream if it exits
+                try
+                {
+                    var proc = Process.GetProcessById(pid);
+                    proc.EnableRaisingEvents = true;
+                    proc.Exited += (s, e) =>
+                    {
+                        backend.StreamRemoved?.Invoke(backend, new AudioStreamEventArgs
+                        {
+                            StreamId = pidStr
+                        });
+                        // Remove from process streams
+                        procModel.Streams.RemoveAll(x => x.Id == pidStr);
+                        if (procModel.Streams.Count == 0)
+                            backend._processes.TryRemove(pid, out _);
+                        backend._processWatchers.TryRemove(pid, out _);
+                    };
+                    backend._processWatchers[pid] = proc;
+                }
+                catch { /* process may not be accessible yet; ignore */ }
+
+                var stream = SessionToStream(control);
+                if (stream is not null)
+                    procModel.Streams.Add(stream);
+
                 backend.StreamCreated?.Invoke(backend, new AudioStreamEventArgs
                 {
-                    StreamId = pidStr
+                    StreamId = pidStr,
+                    Stream = stream
                 });
             }
             catch { /* ignore notification errors */ }
@@ -422,7 +477,7 @@ public sealed class WindowsAudioBackend : IAudioBackend
     /// Monitors an individual audio session for disconnect/state changes.
     /// Fires StreamRemoved when the session's process exits.
     /// </summary>
-    private sealed class SessionEventClient(WindowsAudioBackend backend, int pid) : IAudioSessionEventsHandler
+    private sealed class SessionEventClient(WindowsBackend backend, int pid) : IAudioSessionEventsHandler
     {
         private readonly string _pidString = pid.ToString();
 
@@ -434,28 +489,52 @@ public sealed class WindowsAudioBackend : IAudioBackend
 
         public void OnStateChanged(AudioSessionState state)
         {
+            // Only treat expiration as a signal to remove the stream. Inactive
+            // states may be transient while the app is still running.
             if (state == AudioSessionState.AudioSessionStateExpired)
             {
                 backend.StreamRemoved?.Invoke(backend, new AudioStreamEventArgs
                 {
                     StreamId = _pidString
                 });
+                // Cleanup any associated process watcher to avoid leaks
+                if (int.TryParse(_pidString, out var pid))
+                {
+                    backend._processWatchers.TryRemove(pid, out _);
+                    if (backend._processes.TryGetValue(pid, out var proc))
+                    {
+                        proc.Streams.RemoveAll(x => x.Id == _pidString);
+                        if (proc.Streams.Count == 0)
+                            backend._processes.TryRemove(pid, out _);
+                    }
+                }
             }
         }
 
         public void OnSessionDisconnected(AudioSessionDisconnectReason disconnectReason)
         {
-            backend.StreamRemoved?.Invoke(backend, new AudioStreamEventArgs
+            // Treat disconnect as a potential end of stream; remove the stream
+            // if it exists in the per-process list.
+            if (int.TryParse(_pidString, out var pid))
             {
-                StreamId = _pidString
-            });
+                if (backend._processes.TryGetValue(pid, out var proc))
+                {
+                    proc.Streams.RemoveAll(x => x.Id == _pidString);
+                    backend.StreamRemoved?.Invoke(backend, new AudioStreamEventArgs
+                    {
+                        StreamId = _pidString
+                    });
+                    if (proc.Streams.Count == 0)
+                        backend._processes.TryRemove(pid, out _);
+                }
+            }
         }
     }
 
     /// <summary>
     /// Handles device add/remove/change notifications.
     /// </summary>
-    private sealed class DeviceNotificationClient(WindowsAudioBackend backend) : IMMNotificationClient
+    private sealed class DeviceNotificationClient(WindowsBackend backend) : IMMNotificationClient
     {
         public void OnDeviceStateChanged(string deviceId, DeviceState newState)
         {

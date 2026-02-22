@@ -362,6 +362,8 @@ public class MainViewModel : ReactiveObject
             {
                 if (!running.Contains(prog))
                 {
+                    // Do not mark as running when there are no active streams.
+                    // Keep grouped programs non-running until a stream appears.
                     desiredMembers[gvm.Id].Add(new GroupMemberViewModel(
                         prog, "program", prog, gvm.Id, isRunning: false));
                 }

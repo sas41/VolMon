@@ -12,7 +12,7 @@ builder.Services.AddSingleton<IAudioBackend>(sp =>
     if (OperatingSystem.IsLinux())
         return new PulseAudioBackend();
     if (OperatingSystem.IsWindows())
-        return new WindowsAudioBackend();
+        return new WindowsBackend();
     if (OperatingSystem.IsMacOS())
         return new MacOsAudioBackend();
 

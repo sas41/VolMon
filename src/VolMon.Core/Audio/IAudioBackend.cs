@@ -49,6 +49,9 @@ public interface IAudioBackend : IDisposable
 
     /// <summary>Stops background monitoring.</summary>
     Task StopMonitoringAsync();
+
+    // New: report per-process information (a process with its streams)
+    Task<IReadOnlyList<AudioProcess>> GetProcessesAsync(CancellationToken ct = default);
 }
 
 public sealed class AudioStreamEventArgs : EventArgs

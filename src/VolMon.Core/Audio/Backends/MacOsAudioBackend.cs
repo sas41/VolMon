@@ -3,6 +3,8 @@ using System.Runtime.Versioning;
 
 namespace VolMon.Core.Audio.Backends;
 
+using VolMon.Core.Audio;
+
 /// <summary>
 /// macOS audio backend using CoreAudio HAL (Hardware Abstraction Layer) via P/Invoke.
 ///
@@ -150,6 +152,9 @@ public sealed class MacOsAudioBackend : IAudioBackend
     /// </remarks>
     public Task<IReadOnlyList<AudioStream>> GetStreamsAsync(CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<AudioStream>>(Array.Empty<AudioStream>());
+
+    public Task<IReadOnlyList<VolMon.Core.Audio.AudioProcess>> GetProcessesAsync(CancellationToken ct = default) =>
+        Task.FromResult((IReadOnlyList<VolMon.Core.Audio.AudioProcess>)Array.Empty<VolMon.Core.Audio.AudioProcess>());
 
     /// <inheritdoc/>
     /// <remarks>No-op on macOS — per-app stream control is not available.</remarks>

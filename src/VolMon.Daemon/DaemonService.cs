@@ -42,7 +42,7 @@ public sealed class DaemonService : BackgroundService
             // Load config
             await _configManager.LoadAsync(stoppingToken);
             await EnsureGroupIdsAsync(stoppingToken);
-            await EnsureIgnoredGroupExistsAsync(stoppingToken);
+            await MigrateIgnoredGroupAsync(stoppingToken);
             _configManager.StartWatching();
             _configManager.StartPeriodicSave();
             _configManager.ConfigChanged += OnConfigChanged;
@@ -142,6 +142,10 @@ public sealed class DaemonService : BackgroundService
                 "add-device" => await HandleAddDeviceAsync(request, ct),
                 "remove-device" => await HandleRemoveDeviceAsync(request, ct),
                 "set-default-group" => await HandleSetDefaultGroupAsync(request, ct),
+                "unset-default-group" => await HandleUnsetDefaultGroupAsync(request, ct),
+                "toggle-skip-shortcut" => HandleToggleSkipShortcut(request),
+                "ignore-program" => await HandleIgnoreProgramAsync(request, ct),
+                "unignore-program" => await HandleUnignoreProgramAsync(request, ct),
                 "move-group" => await HandleMoveGroupAsync(request, ct),
                 "set-group-color" => await HandleSetGroupColorAsync(request, ct),
                 "rename-group" => await HandleRenameGroupAsync(request, ct),
@@ -173,8 +177,10 @@ public sealed class DaemonService : BackgroundService
         "add-group" or "remove-group" or
         "add-program" or "remove-program" or
         "add-device" or "remove-device" or
-        "set-default-group" or "move-group" or
-        "set-group-color" or "rename-group" or
+        "set-default-group" or "unset-default-group" or
+        "toggle-skip-shortcut" or
+        "ignore-program" or "unignore-program" or
+        "move-group" or "set-group-color" or "rename-group" or
         "reorder-groups" or "reload" => true,
         _ => false
     };
@@ -205,7 +211,8 @@ public sealed class DaemonService : BackgroundService
         Status = BuildStatus(),
         Groups = _configManager.Config.Groups,
         Processes = SnapshotProcesses(),
-        Devices = SnapshotDevices()
+        Devices = SnapshotDevices(),
+        IgnoredPrograms = _configManager.Config.IgnoredPrograms
     };
 
     // ── Command handlers ─────────────────────────────────────────────
@@ -260,9 +267,6 @@ public sealed class DaemonService : BackgroundService
         if (FindGroupByName(request.Group.Name) is not null)
             return new IpcResponse { Success = false, Error = $"Group '{request.Group.Name}' already exists" };
 
-        // Only the daemon can create the ignored group
-        request.Group.IsIgnored = false;
-
         // Assign a GUID if not provided
         if (request.Group.Id == Guid.Empty)
             request.Group.Id = Guid.NewGuid();
@@ -288,8 +292,7 @@ public sealed class DaemonService : BackgroundService
         var group = ResolveGroup(request);
         if (group is null)
             return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
-        if (group.IsIgnored)
-            return new IpcResponse { Success = false, Error = "The Ignored group cannot be deleted" };
+
 
         _configManager.Config.Groups.Remove(group);
         _configManager.MarkDirty();
@@ -309,7 +312,9 @@ public sealed class DaemonService : BackgroundService
         if (group is null)
             return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
 
-        // Remove from any other group first
+        // Remove from the ignored list and from any other group first
+        _configManager.Config.IgnoredPrograms.RemoveAll(
+            p => p.Equals(request.ProgramName, StringComparison.OrdinalIgnoreCase));
         foreach (var g in _configManager.Config.Groups)
             g.Programs.RemoveAll(p => p.Equals(request.ProgramName, StringComparison.OrdinalIgnoreCase));
 
@@ -448,8 +453,7 @@ public sealed class DaemonService : BackgroundService
         var group = ResolveGroup(request);
         if (group is null)
             return Task.FromResult(new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" });
-        if (group.IsIgnored)
-            return Task.FromResult(new IpcResponse { Success = false, Error = "The Ignored group cannot be renamed" });
+
 
         // Check the new name isn't already taken
         if (FindGroupByName(request.NewName) is not null)
@@ -516,13 +520,73 @@ public sealed class DaemonService : BackgroundService
         return new IpcResponse { Success = true };
     }
 
+    private Task<IpcResponse> HandleUnsetDefaultGroupAsync(IpcRequest request, CancellationToken ct)
+    {
+        var group = ResolveGroup(request);
+        if (group is null)
+            return Task.FromResult(new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" });
+
+        group.IsDefault = false;
+        _configManager.MarkDirty();
+        return Task.FromResult(new IpcResponse { Success = true });
+    }
+
+    private IpcResponse HandleToggleSkipShortcut(IpcRequest request)
+    {
+        var group = ResolveGroup(request);
+        if (group is null)
+            return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
+
+        group.SkipShortcut = !group.SkipShortcut;
+        _configManager.MarkDirty();
+        return new IpcResponse { Success = true };
+    }
+
+    private async Task<IpcResponse> HandleIgnoreProgramAsync(IpcRequest request, CancellationToken ct)
+    {
+        if (request.ProgramName is null)
+            return new IpcResponse { Success = false, Error = "Program name is required" };
+
+        var ignored = _configManager.Config.IgnoredPrograms;
+        if (!ignored.Contains(request.ProgramName, StringComparer.OrdinalIgnoreCase))
+            ignored.Add(request.ProgramName);
+
+        // Remove from any group it was explicitly assigned to
+        foreach (var g in _configManager.Config.Groups)
+            g.Programs.RemoveAll(p => p.Equals(request.ProgramName, StringComparison.OrdinalIgnoreCase));
+
+        _configManager.MarkDirty();
+
+        if (_watcher is not null)
+            await _watcher.ReassignAllAsync(ct);
+
+        return new IpcResponse { Success = true };
+    }
+
+    private async Task<IpcResponse> HandleUnignoreProgramAsync(IpcRequest request, CancellationToken ct)
+    {
+        if (request.ProgramName is null)
+            return new IpcResponse { Success = false, Error = "Program name is required" };
+
+        _configManager.Config.IgnoredPrograms.RemoveAll(
+            p => p.Equals(request.ProgramName, StringComparison.OrdinalIgnoreCase));
+
+        _configManager.MarkDirty();
+
+        if (_watcher is not null)
+            await _watcher.ReassignAllAsync(ct);
+
+        return new IpcResponse { Success = true };
+    }
+
     private IpcResponse HandleStatus() => new()
     {
         Success = true,
         Status = BuildStatus(),
         Groups = _configManager.Config.Groups,
         Processes = SnapshotProcesses(),
-        Devices = SnapshotDevices()
+        Devices = SnapshotDevices(),
+        IgnoredPrograms = _configManager.Config.IgnoredPrograms
     };
 
     private async Task<IpcResponse> HandleReloadAsync(CancellationToken ct)
@@ -619,23 +683,28 @@ public sealed class DaemonService : BackgroundService
     // ── Helpers ──────────────────────────────────────────────────────
 
     /// <summary>
-    /// Ensures the permanent "Ignored" group exists in config.
+    /// Migrates old configs that stored ignored programs as a special AudioGroup
+    /// into the new IgnoredPrograms list on VolMonConfig, then removes the group.
     /// </summary>
-    private async Task EnsureIgnoredGroupExistsAsync(CancellationToken ct)
+    private async Task MigrateIgnoredGroupAsync(CancellationToken ct)
     {
-        if (_configManager.Config.Groups.Any(g => g.IsIgnored))
-            return;
+        // Find any legacy ignored group (from old configs that had IsIgnored on AudioGroup).
+        // Since we removed IsIgnored from AudioGroup, we detect it by name convention.
+        var legacyIgnored = _configManager.Config.Groups
+            .FirstOrDefault(g => g.Name.Equals("Ignored", StringComparison.OrdinalIgnoreCase)
+                               && g.Volume == 0);
+        if (legacyIgnored is null) return;
 
-        _configManager.Config.Groups.Add(new AudioGroup
+        // Migrate its Programs into IgnoredPrograms
+        foreach (var prog in legacyIgnored.Programs)
         {
-            Id = Guid.NewGuid(),
-            Name = "Ignored",
-            IsIgnored = true,
-            Volume = 0,
-            Color = "#808080"
-        });
+            if (!_configManager.Config.IgnoredPrograms.Contains(prog, StringComparer.OrdinalIgnoreCase))
+                _configManager.Config.IgnoredPrograms.Add(prog);
+        }
+
+        _configManager.Config.Groups.Remove(legacyIgnored);
         await _configManager.SaveAsync(ct);
-        _logger.LogInformation("Created permanent Ignored group");
+        _logger.LogInformation("Migrated legacy Ignored group to IgnoredPrograms list");
     }
 
     /// <summary>

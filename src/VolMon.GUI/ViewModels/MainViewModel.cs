@@ -102,7 +102,6 @@ public class MainViewModel : ReactiveObject
     ];
 
     private IpcDuplexClient? _client;
-    private Guid? _ignoredGroupId;
     private bool _isConnecting;
     private string? _lastStateFingerprint;
 
@@ -237,7 +236,7 @@ public class MainViewModel : ReactiveObject
         // Marshal to UI thread — pass event fields directly to avoid an
         // unnecessary IpcResponse wrapper allocation.
         Dispatcher.UIThread.Post(() =>
-            RefreshData(evt.Status, evt.Groups, evt.Processes, evt.Devices));
+            RefreshData(evt.Status, evt.Groups, evt.Processes, evt.Devices, evt.IgnoredPrograms));
     }
 
     /// <summary>
@@ -259,13 +258,14 @@ public class MainViewModel : ReactiveObject
     // ── Data refresh (called from push events) ───────────────────────
 
     private void RefreshData(IpcResponse resp) =>
-        RefreshData(resp.Status, resp.Groups, resp.Processes, resp.Devices);
+        RefreshData(resp.Status, resp.Groups, resp.Processes, resp.Devices, resp.IgnoredPrograms);
 
     private void RefreshData(
         DaemonStatus? status,
         List<AudioGroup>? groups,
         List<AudioProcessInfo>? processes,
-        List<AudioDeviceInfo>? devices)
+        List<AudioDeviceInfo>? devices,
+        List<string>? ignoredPrograms = null)
     {
         // Quick fingerprint to skip expensive reconciliation when nothing changed.
         // We combine the cheapest-to-read counts + mutable scalars into a string
@@ -282,16 +282,13 @@ public class MainViewModel : ReactiveObject
             StatusSummary = $"Streams: {status.ActiveStreams}  |  Devices: {status.ActiveDevices}  |  Groups: {status.ConfiguredGroups}";
         }
 
-        // ── Groups (Ignored group hidden from columns)
-        _ignoredGroupId = null;
-
+        // ── Groups
         var desiredGroups = new List<GroupColumnViewModel>();
         if (groups is not null)
         {
             var ci = 0;
             foreach (var g in groups)
             {
-                if (g.IsIgnored) { _ignoredGroupId = g.Id; continue; }
                 var color = g.Color ?? ColorPalette[ci % ColorPalette.Length];
                 desiredGroups.Add(new GroupColumnViewModel(g, color, SendCommandAsync, SendQuietAsync));
                 ci++;
@@ -314,17 +311,25 @@ public class MainViewModel : ReactiveObject
 
         var desiredPrograms = new List<PoolItemViewModel>();
 
+        var ignoredSet = new HashSet<string>(
+            ignoredPrograms ?? [], StringComparer.OrdinalIgnoreCase);
+
         if (processes is not null)
         {
             foreach (var proc in processes)
             {
+                // Ignored programs go to the Applications pool with IsIgnored=true.
+                if (ignoredSet.Contains(proc.Name))
+                {
+                    desiredPrograms.Add(new PoolItemViewModel(proc.Name, "program", proc.Name, isIgnored: true));
+                    continue;
+                }
+
                 // Determine the best group assignment from this process's streams.
                 Guid? bestGroupId = null;
                 foreach (var s in proc.Streams)
                 {
-                    var isIgnoredOrNull = s.AssignedGroup is null ||
-                        (_ignoredGroupId.HasValue && s.AssignedGroup == _ignoredGroupId.Value);
-                    if (!isIgnoredOrNull && bestGroupId is null)
+                    if (s.AssignedGroup is not null && bestGroupId is null)
                         bestGroupId = s.AssignedGroup;
                 }
 
@@ -349,7 +354,7 @@ public class MainViewModel : ReactiveObject
                 }
                 else if (proc.Streams.Count > 0)
                 {
-                    // Has streams but no (non-ignored) group — goes to Applications pool.
+                    // Has streams but no group — goes to Applications pool.
                     desiredPrograms.Add(new PoolItemViewModel(proc.Name, "program", proc.Name));
                 }
                 // Processes with no streams and no group are not shown (per spec).
@@ -533,6 +538,10 @@ public class MainViewModel : ReactiveObject
         try { await configManager.LoadAsync(); }
         catch { /* defaults */ }
 
+        // Restore last shortcut target from previous session
+        if (configManager.Config.LastTargetGroupId is { } savedId)
+            _targetGroupId = savedId;
+
         var sc = configManager.Config.Shortcuts;
         var desired = new List<ShortcutBindingViewModel>
         {
@@ -614,21 +623,12 @@ public class MainViewModel : ReactiveObject
     {
         if (_client is null) return;
 
-        if (itemType == "program" && _ignoredGroupId.HasValue)
+        if (itemType == "program")
         {
+            // Dragging a program out of a group sends it to the ignored list.
             await _client.SendAsync(new IpcRequest
             {
-                Command = "add-program",
-                GroupId = _ignoredGroupId.Value,
-                ProgramName = id
-            });
-        }
-        else if (itemType == "program")
-        {
-            await _client.SendAsync(new IpcRequest
-            {
-                Command = "remove-program",
-                GroupId = currentGroupId,
+                Command = "ignore-program",
                 ProgramName = id
             });
         }
@@ -655,7 +655,6 @@ public class MainViewModel : ReactiveObject
         Groups.Move(Groups.IndexOf(src), Groups.IndexOf(tgt));
 
         var order = Groups.Select(g => g.Id.ToString()).ToList();
-        if (_ignoredGroupId.HasValue) order.Add(_ignoredGroupId.Value.ToString());
 
         try
         {
@@ -725,30 +724,60 @@ public class MainViewModel : ReactiveObject
 
     private void SelectNextGroup()
     {
-        if (Groups.Count == 0) return;
+        // Only consider non-skipped groups
+        var eligible = Groups.Where(g => !g.SkipShortcut).ToList();
+        if (eligible.Count == 0) return;
 
-        var currentIndex = GetTargetIndex();
-        var nextIndex = (currentIndex + 1) % Groups.Count;
-        _targetGroupId = Groups[nextIndex].Id;
+        var currentIndex = eligible.FindIndex(g => g.Id == _targetGroupId);
+        var nextIndex = (currentIndex + 1) % eligible.Count;
+        SetTarget(eligible[nextIndex].Id);
     }
 
     private void SelectPreviousGroup()
     {
-        if (Groups.Count == 0) return;
+        var eligible = Groups.Where(g => !g.SkipShortcut).ToList();
+        if (eligible.Count == 0) return;
 
-        var currentIndex = GetTargetIndex();
-        var prevIndex = currentIndex <= 0 ? Groups.Count - 1 : currentIndex - 1;
-        _targetGroupId = Groups[prevIndex].Id;
+        var currentIndex = eligible.FindIndex(g => g.Id == _targetGroupId);
+        var prevIndex = currentIndex <= 0 ? eligible.Count - 1 : currentIndex - 1;
+        SetTarget(eligible[prevIndex].Id);
     }
 
     private void EnsureTarget()
     {
-        if (_targetGroupId.HasValue && Groups.Any(g => g.Id == _targetGroupId.Value))
-            return;
+        // If current target is valid and not skip-flagged, keep it.
+        if (_targetGroupId.HasValue)
+        {
+            var current = Groups.FirstOrDefault(g => g.Id == _targetGroupId.Value);
+            if (current is not null && !current.SkipShortcut)
+                return;
+        }
 
-        // Default to first group
-        if (Groups.Count > 0)
-            _targetGroupId = Groups[0].Id;
+        // Fall back to first non-skipped group.
+        var first = Groups.FirstOrDefault(g => !g.SkipShortcut);
+        if (first is not null)
+            SetTarget(first.Id);
+    }
+
+    /// <summary>Sets the shortcut target group and persists it to config.</summary>
+    private void SetTarget(Guid id)
+    {
+        if (_targetGroupId == id) return;
+        _targetGroupId = id;
+        _ = PersistTargetGroupAsync(id);
+    }
+
+    /// <summary>Saves LastTargetGroupId to the config file (best-effort, fire-and-forget).</summary>
+    private static async Task PersistTargetGroupAsync(Guid id)
+    {
+        try
+        {
+            using var cm = new ConfigManager();
+            await cm.LoadAsync();
+            cm.Config.LastTargetGroupId = id;
+            await cm.SaveAsync();
+        }
+        catch { /* best-effort */ }
     }
 
     private GroupColumnViewModel? GetTargetGroup()
@@ -805,6 +834,7 @@ public class GroupColumnViewModel : ReactiveObject
     private int _volume;
     private bool _muted;
     private bool _isDefault;
+    private bool _skipShortcut;
     private string _colorHex;
     private IBrush _colorBrush;
     private CancellationTokenSource? _volumeDebounce;
@@ -904,19 +934,41 @@ public class GroupColumnViewModel : ReactiveObject
     public bool IsDefault
     {
         get => _isDefault;
-        set
+        private set => this.RaiseAndSetIfChanged(ref _isDefault, value);
+    }
+
+    /// <summary>
+    /// Toggles the default state. If already default, unsets it (no default group).
+    /// If not default, sets this group as default (daemon clears others).
+    /// </summary>
+    public void ToggleDefault()
+    {
+        if (_isDefault)
         {
-            if (_isDefault == value) return;
-            this.RaiseAndSetIfChanged(ref _isDefault, value);
-            if (value)
-            {
-                _ = _sendCommand(new IpcRequest
-                {
-                    Command = "set-default-group",
-                    GroupId = Id
-                });
-            }
+            IsDefault = false;
+            _ = _sendCommand(new IpcRequest { Command = "unset-default-group", GroupId = Id });
         }
+        else
+        {
+            IsDefault = true;
+            _ = _sendCommand(new IpcRequest { Command = "set-default-group", GroupId = Id });
+        }
+    }
+
+    public bool SkipShortcut
+    {
+        get => _skipShortcut;
+        private set => this.RaiseAndSetIfChanged(ref _skipShortcut, value);
+    }
+
+    /// <summary>
+    /// Toggles whether this group is skipped by the shortcut cycle.
+    /// The daemon persists the change; the GUI optimistically flips locally.
+    /// </summary>
+    public void ToggleSkipShortcut()
+    {
+        SkipShortcut = !_skipShortcut;
+        _ = _sendCommand(new IpcRequest { Command = "toggle-skip-shortcut", GroupId = Id });
     }
 
     public ReactiveCommand<Unit, Unit> DeleteCommand { get; }
@@ -942,6 +994,7 @@ public class GroupColumnViewModel : ReactiveObject
         _volume = group.Volume;
         _muted = group.Muted;
         _isDefault = group.IsDefault;
+        _skipShortcut = group.SkipShortcut;
         _colorHex = colorHex;
 
         try { _colorBrush = SolidColorBrush.Parse(colorHex); }
@@ -1006,6 +1059,12 @@ public class GroupColumnViewModel : ReactiveObject
             this.RaisePropertyChanged(nameof(IsDefault));
         }
 
+        if (_skipShortcut != source._skipShortcut)
+        {
+            _skipShortcut = source._skipShortcut;
+            this.RaisePropertyChanged(nameof(SkipShortcut));
+        }
+
         if (_colorHex != source._colorHex)
         {
             ColorHex = source._colorHex;
@@ -1061,11 +1120,15 @@ public class PoolItemViewModel
     public string ItemType { get; }
     public string Identifier { get; }
 
-    public PoolItemViewModel(string displayName, string itemType, string identifier)
+    /// <summary>True when this program is in the IgnoredPrograms list (shown with ⊗ icon).</summary>
+    public bool IsIgnored { get; }
+
+    public PoolItemViewModel(string displayName, string itemType, string identifier, bool isIgnored = false)
     {
         DisplayName = displayName;
         ItemType = itemType;
         Identifier = identifier;
+        IsIgnored = isIgnored;
     }
 }
 

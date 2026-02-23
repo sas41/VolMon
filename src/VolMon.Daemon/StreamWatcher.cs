@@ -154,15 +154,9 @@ public sealed class StreamWatcher : IDisposable
 
     /// <summary>
     /// Applies volume/mute settings to all streams and devices in the specified group.
-    /// Ignored groups are skipped — their members' volumes are never changed.
     /// </summary>
     public async Task ApplyGroupSettingsAsync(AudioGroup group, CancellationToken ct = default)
     {
-        if (group.IsIgnored)
-        {
-            _logger.LogDebug("Skipping volume for ignored group {Group}", group.Name);
-            return;
-        }
 
         // Snapshot to avoid "collection was modified" if pactl events fire concurrently
         var streams = _activeStreams.Values.Where(s => s.AssignedGroup == group.Id).ToArray();
@@ -306,6 +300,13 @@ public sealed class StreamWatcher : IDisposable
     {
         var config = _configManager.Config;
 
+        // Ignored programs are never assigned to any group.
+        if (config.IgnoredPrograms.Contains(stream.BinaryName, StringComparer.OrdinalIgnoreCase))
+        {
+            stream.AssignedGroup = null;
+            return;
+        }
+
         // Check explicit program lists first
         foreach (var group in config.Groups)
         {
@@ -358,8 +359,7 @@ public sealed class StreamWatcher : IDisposable
             g => g.Id == stream.AssignedGroup);
         if (group is null) return;
 
-        // Ignored group — never touch volume
-        if (group.IsIgnored) return;
+
 
         try
         {

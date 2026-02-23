@@ -111,12 +111,10 @@ static void PrintResponse(string command, IpcResponse response)
                 {
                     var flags = new List<string>();
                     if (g.IsDefault) flags.Add("DEFAULT");
-                    if (g.IsIgnored) flags.Add("IGNORED");
                     if (g.Muted) flags.Add("MUTED");
                     var flagStr = flags.Count > 0 ? $" [{string.Join(", ", flags)}]" : "";
 
-                    var volStr = g.IsIgnored ? "--" : $"{g.Volume}%";
-                    Console.WriteLine($"  {g.Name}: {volStr}{flagStr}");
+                    Console.WriteLine($"  {g.Name}: {g.Volume}%{flagStr}");
 
                     if (g.Programs.Count > 0)
                         Console.WriteLine($"    Programs: {string.Join(", ", g.Programs)}");

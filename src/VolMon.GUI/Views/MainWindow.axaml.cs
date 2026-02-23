@@ -236,9 +236,40 @@ public partial class MainWindow : Window
         renameBtn.Click += (_, _) =>
         {
             flyout?.Hide();
-            // Short delay to let the menu close before the rename flyout opens
             DispatcherTimer.RunOnce(() => ShowRenameFlyout(anchor, groupVm),
                 TimeSpan.FromMilliseconds(50));
+        };
+
+        var defaultLabel = groupVm.IsDefault ? "Unset Default" : "Set as Default";
+        var defaultBtn = new Button
+        {
+            Content = defaultLabel,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Background = Brushes.Transparent,
+            Foreground = SolidColorBrush.Parse("#CCC"),
+            Padding = new Thickness(8, 4),
+        };
+        defaultBtn.Click += (_, _) =>
+        {
+            flyout?.Hide();
+            groupVm.ToggleDefault();
+        };
+
+        var skipLabel = groupVm.SkipShortcut ? "Include in Shortcuts" : "Skip in Shortcuts";
+        var skipBtn = new Button
+        {
+            Content = skipLabel,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Background = Brushes.Transparent,
+            Foreground = SolidColorBrush.Parse("#CCC"),
+            Padding = new Thickness(8, 4),
+        };
+        skipBtn.Click += (_, _) =>
+        {
+            flyout?.Hide();
+            groupVm.ToggleSkipShortcut();
         };
 
         var deleteBtn = new Button
@@ -260,9 +291,9 @@ public partial class MainWindow : Window
         {
             Content = new StackPanel
             {
-                Width = 110,
+                Width = 150,
                 Spacing = 2,
-                Children = { renameBtn, deleteBtn }
+                Children = { renameBtn, defaultBtn, skipBtn, deleteBtn }
             },
             Placement = PlacementMode.BottomEdgeAlignedRight,
         };
@@ -488,7 +519,7 @@ public partial class MainWindow : Window
         while (c is not null)
         {
             if (c is Slider or Track or Thumb or RepeatButton
-                or Button or CheckBox or RadioButton or TextBox
+                or Button or CheckBox or TextBox
                 or ScrollBar)
                 return true;
             c = c.GetVisualParent() as Control;

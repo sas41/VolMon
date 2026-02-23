@@ -10,8 +10,20 @@ public sealed class VolMonConfig
     /// <summary>Configured audio groups.</summary>
     public List<AudioGroup> Groups { get; set; } = [];
 
+    /// <summary>
+    /// Programs explicitly ignored by the user. These are never auto-assigned
+    /// to a group and their volume is never changed. Not counted as a group.
+    /// </summary>
+    public List<string> IgnoredPrograms { get; set; } = [];
+
     /// <summary>Global shortcut key bindings (GUI only).</summary>
     public ShortcutConfig Shortcuts { get; set; } = new();
+
+    /// <summary>
+    /// The group last targeted by the shortcut system. Persisted so the
+    /// next session resumes on the same group.
+    /// </summary>
+    public Guid? LastTargetGroupId { get; set; }
 }
 
 /// <summary>

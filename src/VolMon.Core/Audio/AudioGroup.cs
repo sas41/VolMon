@@ -28,17 +28,16 @@ public sealed class AudioGroup
     public bool IsDefault { get; set; }
 
     /// <summary>
-    /// If true, this is the special "Ignored" group. Programs in this group
-    /// have their volume never changed by the daemon. There is exactly one
-    /// ignored group and it cannot be deleted.
-    /// </summary>
-    public bool IsIgnored { get; set; }
-
-    /// <summary>
     /// Display color for this group in the GUI, stored as a hex string (e.g. "#FF9500").
     /// Null means the GUI should auto-assign from its palette.
     /// </summary>
     public string? Color { get; set; }
+
+    /// <summary>
+    /// When true, global shortcut cycling (next/previous group) skips this group.
+    /// Volume/mute shortcuts also skip it while it is the target.
+    /// </summary>
+    public bool SkipShortcut { get; set; }
 
     /// <summary>
     /// Process binary names that belong to this group (e.g. "spotify", "firefox").

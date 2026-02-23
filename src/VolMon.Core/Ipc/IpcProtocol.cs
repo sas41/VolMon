@@ -94,6 +94,7 @@ public sealed class IpcEvent
     public List<AudioGroup>? Groups { get; init; }
     public List<AudioProcessInfo>? Processes { get; init; }
     public List<AudioDeviceInfo>? Devices { get; init; }
+    public List<string>? IgnoredPrograms { get; init; }
     public DaemonStatus? Status { get; init; }
 }
 
@@ -148,6 +149,7 @@ public sealed class IpcResponse
     public List<AudioGroup>? Groups { get; init; }
     public List<AudioProcessInfo>? Processes { get; init; }
     public List<AudioDeviceInfo>? Devices { get; init; }
+    public List<string>? IgnoredPrograms { get; init; }
     public DaemonStatus? Status { get; init; }
 }
 

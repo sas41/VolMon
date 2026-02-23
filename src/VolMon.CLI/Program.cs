@@ -132,16 +132,24 @@ static void PrintResponse(string command, IpcResponse response)
             break;
 
         case "list-streams" or "streams":
-            if (response.Streams is { Count: > 0 } streams)
+            if (response.Processes is { Count: > 0 } procs)
             {
-                Console.WriteLine($"{"ID",-6} {"Binary",-20} {"Vol",-5} {"Muted",-6} {"Group",-15}");
+                Console.WriteLine($"{"Process",-20} {"ID",-6} {"Vol",-5} {"Muted",-6} {"Group",-15}");
                 Console.WriteLine(new string('-', 52));
-                foreach (var s in streams)
+                foreach (var proc in procs)
                 {
-                    var groupName = s.AssignedGroup.HasValue ? s.AssignedGroup.Value.ToString() : "-";
-                    Console.WriteLine(
-                        $"{s.Id,-6} {s.BinaryName,-20} {s.Volume + "%",-5} " +
-                        $"{(s.Muted ? "yes" : "no"),-6} {groupName,-15}");
+                    if (proc.Streams.Count == 0)
+                    {
+                        Console.WriteLine($"{proc.Name,-20} {"(silent)",-6}");
+                        continue;
+                    }
+                    foreach (var s in proc.Streams)
+                    {
+                        var groupName = s.AssignedGroup.HasValue ? s.AssignedGroup.Value.ToString() : "-";
+                        Console.WriteLine(
+                            $"{proc.Name,-20} {s.Id,-6} {s.Volume + "%",-5} " +
+                            $"{(s.Muted ? "yes" : "no"),-6} {groupName,-15}");
+                    }
                 }
             }
             else

@@ -237,7 +237,7 @@ public class MainViewModel : ReactiveObject
         // Marshal to UI thread — pass event fields directly to avoid an
         // unnecessary IpcResponse wrapper allocation.
         Dispatcher.UIThread.Post(() =>
-            RefreshData(evt.Status, evt.Groups, evt.Streams, evt.Devices));
+            RefreshData(evt.Status, evt.Groups, evt.Processes, evt.Devices));
     }
 
     /// <summary>
@@ -259,18 +259,18 @@ public class MainViewModel : ReactiveObject
     // ── Data refresh (called from push events) ───────────────────────
 
     private void RefreshData(IpcResponse resp) =>
-        RefreshData(resp.Status, resp.Groups, resp.Streams, resp.Devices);
+        RefreshData(resp.Status, resp.Groups, resp.Processes, resp.Devices);
 
     private void RefreshData(
         DaemonStatus? status,
         List<AudioGroup>? groups,
-        List<AudioStreamInfo>? streams,
+        List<AudioProcessInfo>? processes,
         List<AudioDeviceInfo>? devices)
     {
         // Quick fingerprint to skip expensive reconciliation when nothing changed.
         // We combine the cheapest-to-read counts + mutable scalars into a string
         // that changes whenever the UI would need to update.
-        var fingerprint = BuildFingerprint(status, groups, streams, devices);
+        var fingerprint = BuildFingerprint(status, groups, processes, devices);
         if (fingerprint == _lastStateFingerprint)
             return;
         _lastStateFingerprint = fingerprint;
@@ -302,51 +302,57 @@ public class MainViewModel : ReactiveObject
             keyOf: g => g.Id,
             update: (existing, fresh) => existing.UpdateFrom(fresh));
 
-        // ── Streams → group members or Applications pool
-        // A single program (e.g. Firefox) can have multiple streams (one per
-        // tab). We deduplicate by binary name so each program appears only
-        // once — either in its assigned group or in the Applications pool.
-        //
-        // Two-pass: first collect per-binary "best" assignment (a real group
-        // wins over Ignored/unassigned), then place each binary exactly once.
+        // ── Processes → group members or Applications pool
+        // Each AudioProcessInfo is already deduplicated by binary name by the daemon.
+        // A process with streams uses the best stream assignment (real group wins
+        // over Ignored/unassigned). A process with no streams but included by the
+        // daemon is running-but-silent and shown as running in its configured group.
 
-        // Per-group members built into temporary lists, then reconciled
         var desiredMembers = new Dictionary<Guid, List<GroupMemberViewModel>>();
         foreach (var gvm in Groups)
             desiredMembers[gvm.Id] = new List<GroupMemberViewModel>();
 
         var desiredPrograms = new List<PoolItemViewModel>();
 
-        if (streams is not null)
+        if (processes is not null)
         {
-            var bestAssignment = new Dictionary<string, Guid?>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var s in streams)
+            foreach (var proc in processes)
             {
-                var isIgnoredOrNull = s.AssignedGroup is null ||
-                    (_ignoredGroupId.HasValue && s.AssignedGroup == _ignoredGroupId.Value);
-
-                if (!bestAssignment.TryGetValue(s.BinaryName, out var existing))
+                // Determine the best group assignment from this process's streams.
+                Guid? bestGroupId = null;
+                foreach (var s in proc.Streams)
                 {
-                    bestAssignment[s.BinaryName] = isIgnoredOrNull ? null : s.AssignedGroup;
+                    var isIgnoredOrNull = s.AssignedGroup is null ||
+                        (_ignoredGroupId.HasValue && s.AssignedGroup == _ignoredGroupId.Value);
+                    if (!isIgnoredOrNull && bestGroupId is null)
+                        bestGroupId = s.AssignedGroup;
                 }
-                else if (existing is null && !isIgnoredOrNull)
-                {
-                    bestAssignment[s.BinaryName] = s.AssignedGroup;
-                }
-            }
 
-            foreach (var (binary, groupId) in bestAssignment)
-            {
-                if (groupId is { } assignedId && desiredMembers.ContainsKey(assignedId))
+                // A process with no streams is running-but-silent; the daemon only
+                // sends it if it is configured, so find which group has it.
+                if (bestGroupId is null && proc.Streams.Count == 0)
+                {
+                    foreach (var gvm in Groups)
+                    {
+                        if (gvm.ConfiguredPrograms.Contains(proc.Name, StringComparer.OrdinalIgnoreCase))
+                        {
+                            bestGroupId = gvm.Id;
+                            break;
+                        }
+                    }
+                }
+
+                if (bestGroupId is { } assignedId && desiredMembers.ContainsKey(assignedId))
                 {
                     desiredMembers[assignedId].Add(new GroupMemberViewModel(
-                        binary, "program", binary, assignedId, isRunning: true));
+                        proc.Name, "program", proc.Name, assignedId, isRunning: true));
                 }
-                else
+                else if (proc.Streams.Count > 0)
                 {
-                    desiredPrograms.Add(new PoolItemViewModel(binary, "program", binary));
+                    // Has streams but no (non-ignored) group — goes to Applications pool.
+                    desiredPrograms.Add(new PoolItemViewModel(proc.Name, "program", proc.Name));
                 }
+                // Processes with no streams and no group are not shown (per spec).
             }
         }
 
@@ -362,8 +368,6 @@ public class MainViewModel : ReactiveObject
             {
                 if (!running.Contains(prog))
                 {
-                    // Do not mark as running when there are no active streams.
-                    // Keep grouped programs non-running until a stream appears.
                     desiredMembers[gvm.Id].Add(new GroupMemberViewModel(
                         prog, "program", prog, gvm.Id, isRunning: false));
                 }
@@ -433,7 +437,7 @@ public class MainViewModel : ReactiveObject
     private static string BuildFingerprint(
         DaemonStatus? status,
         List<AudioGroup>? groups,
-        List<AudioStreamInfo>? streams,
+        List<AudioProcessInfo>? processes,
         List<AudioDeviceInfo>? devices)
     {
         // Use a simple DefaultInterpolatedStringHandler to avoid StringBuilder alloc.
@@ -461,15 +465,18 @@ public class MainViewModel : ReactiveObject
         }
         sb.Append(';');
 
-        if (streams is not null)
+        if (processes is not null)
         {
-            foreach (var s in streams)
+            foreach (var p in processes)
             {
-                sb.Append(s.Id).Append(':')
-                  .Append(s.BinaryName).Append(':')
-                  .Append(s.AssignedGroup).Append(':')
-                  .Append(s.Volume).Append(':')
-                  .Append(s.Muted).Append('|');
+                sb.Append(p.Name).Append(':').Append(p.Streams.Count).Append('|');
+                foreach (var s in p.Streams)
+                {
+                    sb.Append(s.Id).Append(':')
+                      .Append(s.AssignedGroup).Append(':')
+                      .Append(s.Volume).Append(':')
+                      .Append(s.Muted).Append('|');
+                }
             }
         }
         sb.Append(';');

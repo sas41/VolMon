@@ -19,6 +19,13 @@ public sealed class StreamWatcher : IDisposable
     /// <summary>Cache of known devices, keyed by device name.</summary>
     private readonly Dictionary<string, AudioDevice> _knownDevices = [];
 
+    /// <summary>
+    /// Last snapshot of running configured process names, used to detect
+    /// process start/quit without audio streams.
+    /// </summary>
+    private HashSet<string> _lastConfiguredRunning = [];
+    private CancellationTokenSource? _processPollCts;
+
     public IReadOnlyDictionary<string, AudioStream> ActiveStreams => _activeStreams;
     public IReadOnlyDictionary<string, AudioDevice> KnownDevices => _knownDevices;
 
@@ -69,6 +76,80 @@ public sealed class StreamWatcher : IDisposable
             await ApplyDeviceSettingsAsync(device, ct);
         }
         _logger.LogInformation("Initial scan found {Count} audio devices", devices.Count);
+
+        // Seed the initial set and start the poll loop.
+        _lastConfiguredRunning = GetRunningConfiguredProcesses();
+        _processPollCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _ = PollConfiguredProcessesAsync(_processPollCts.Token);
+    }
+
+    /// <summary>
+    /// Polls running processes once per second and fires <see cref="StateChanged"/>
+    /// when a configured process appears or disappears, even if it never opens
+    /// an audio stream.
+    /// </summary>
+    private async Task PollConfiguredProcessesAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(1000, ct);
+
+                var current = GetRunningConfiguredProcesses();
+                if (!current.SetEquals(_lastConfiguredRunning))
+                {
+                    _lastConfiguredRunning = current;
+                    RaiseStateChanged();
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    /// <summary>
+    /// Returns the set of configured program names that are currently running.
+    /// On Linux reads /proc; on other platforms uses Process.GetProcesses().
+    /// </summary>
+    private HashSet<string> GetRunningConfiguredProcesses()
+    {
+        var configured = _configManager.Config.Groups
+            .SelectMany(g => g.Programs)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (configured.Count == 0)
+            return [];
+
+        var running = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (OperatingSystem.IsLinux())
+        {
+            foreach (var dir in Directory.EnumerateDirectories("/proc"))
+            {
+                if (!int.TryParse(Path.GetFileName(dir), out _)) continue;
+                try
+                {
+                    var comm = File.ReadAllText(Path.Combine(dir, "comm")).Trim();
+                    if (configured.Contains(comm))
+                        running.Add(comm);
+                }
+                catch { /* process exited */ }
+            }
+        }
+        else
+        {
+            foreach (var proc in System.Diagnostics.Process.GetProcesses())
+            {
+                try
+                {
+                    if (configured.Contains(proc.ProcessName))
+                        running.Add(proc.ProcessName);
+                }
+                catch { /* access denied */ }
+            }
+        }
+
+        return running;
     }
 
     /// <summary>
@@ -345,6 +426,8 @@ public sealed class StreamWatcher : IDisposable
 
     public void Dispose()
     {
+        _processPollCts?.Cancel();
+        _processPollCts?.Dispose();
         _stateChangedDebounce?.Cancel();
         _stateChangedDebounce?.Dispose();
         _backend.StreamCreated -= OnStreamCreated;

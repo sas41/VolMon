@@ -90,9 +90,9 @@ public sealed class IpcEvent
     /// <summary>The kind of state change.</summary>
     public required string Name { get; init; }
 
-    /// <summary>Full state snapshot (groups, streams, devices).</summary>
+    /// <summary>Full state snapshot (groups, processes, devices).</summary>
     public List<AudioGroup>? Groups { get; init; }
-    public List<AudioStreamInfo>? Streams { get; init; }
+    public List<AudioProcessInfo>? Processes { get; init; }
     public List<AudioDeviceInfo>? Devices { get; init; }
     public DaemonStatus? Status { get; init; }
 }
@@ -146,7 +146,7 @@ public sealed class IpcResponse
     public bool Success { get; init; }
     public string? Error { get; init; }
     public List<AudioGroup>? Groups { get; init; }
-    public List<AudioStreamInfo>? Streams { get; init; }
+    public List<AudioProcessInfo>? Processes { get; init; }
     public List<AudioDeviceInfo>? Devices { get; init; }
     public DaemonStatus? Status { get; init; }
 }
@@ -154,6 +154,17 @@ public sealed class IpcResponse
 // ═════════════════════════════════════════════════════════════════════
 // Info DTOs (unchanged)
 // ═════════════════════════════════════════════════════════════════════
+
+/// <summary>
+/// A running process and all its audio streams, for IPC.
+/// Streams may be empty if the process is running but currently silent.
+/// Multiple backend processes with the same binary name are merged into one.
+/// </summary>
+public sealed class AudioProcessInfo
+{
+    public required string Name { get; init; }
+    public List<AudioStreamInfo> Streams { get; init; } = [];
+}
 
 /// <summary>
 /// Simplified stream info for IPC.

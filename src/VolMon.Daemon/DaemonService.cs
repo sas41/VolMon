@@ -204,7 +204,7 @@ public sealed class DaemonService : BackgroundService
         Name = "state-changed",
         Status = BuildStatus(),
         Groups = _configManager.Config.Groups,
-        Streams = SnapshotStreams(),
+        Processes = SnapshotProcesses(),
         Devices = SnapshotDevices()
     };
 
@@ -214,7 +214,7 @@ public sealed class DaemonService : BackgroundService
         new() { Success = true, Groups = _configManager.Config.Groups };
 
     private IpcResponse HandleListStreams() =>
-        new() { Success = true, Streams = SnapshotStreams() };
+        new() { Success = true, Processes = SnapshotProcesses() };
 
     private IpcResponse HandleListDevices() =>
         new() { Success = true, Devices = SnapshotDevices() };
@@ -521,7 +521,7 @@ public sealed class DaemonService : BackgroundService
         Success = true,
         Status = BuildStatus(),
         Groups = _configManager.Config.Groups,
-        Streams = SnapshotStreams(),
+        Processes = SnapshotProcesses(),
         Devices = SnapshotDevices()
     };
 
@@ -552,16 +552,58 @@ public sealed class DaemonService : BackgroundService
         StartedAt = _startedAt
     };
 
-    private List<AudioStreamInfo> SnapshotStreams() =>
-        _watcher?.ActiveStreams.Values.Select(s => new AudioStreamInfo
+    /// <summary>
+    /// Builds the process list for IPC. Each entry is one binary name; streams
+    /// from all backend processes with that name are merged into one list.
+    /// Configured programs that are running but have no streams are included
+    /// with an empty Streams list so the GUI can show them as running-but-silent.
+    /// </summary>
+    private List<AudioProcessInfo> SnapshotProcesses()
+    {
+        // Group active streams by binary name.
+        var byName = new Dictionary<string, List<AudioStreamInfo>>(StringComparer.OrdinalIgnoreCase);
+        if (_watcher is not null)
         {
-            Id = s.Id,
-            BinaryName = s.BinaryName,
-            ApplicationClass = s.ApplicationClass,
-            Volume = s.Volume,
-            Muted = s.Muted,
-            AssignedGroup = s.AssignedGroup
-        }).ToList() ?? [];
+            foreach (var s in _watcher.ActiveStreams.Values)
+            {
+                if (!byName.TryGetValue(s.BinaryName, out var list))
+                    byName[s.BinaryName] = list = [];
+                list.Add(new AudioStreamInfo
+                {
+                    Id = s.Id,
+                    BinaryName = s.BinaryName,
+                    ApplicationClass = s.ApplicationClass,
+                    Volume = s.Volume,
+                    Muted = s.Muted,
+                    AssignedGroup = s.AssignedGroup
+                });
+            }
+        }
+
+        // Seed from GetProcessesAsync so configured-but-silent processes appear.
+        // Use the cached result from the backend (synchronous — LinuxPulseBackend
+        // reads /proc which is instantaneous).
+        try
+        {
+            var processes = _backend.GetProcessesAsync().GetAwaiter().GetResult();
+            foreach (var proc in processes)
+            {
+                // Only include processes that are configured in at least one group.
+                var isConfigured = _configManager.Config.Groups
+                    .Any(g => g.Programs.Contains(proc.Name, StringComparer.OrdinalIgnoreCase));
+                if (!isConfigured) continue;
+
+                // If no streams were already recorded under this name, add an empty entry.
+                if (!byName.ContainsKey(proc.Name))
+                    byName[proc.Name] = [];
+            }
+        }
+        catch { /* backend not yet ready or unsupported — skip */ }
+
+        return byName
+            .Select(kvp => new AudioProcessInfo { Name = kvp.Key, Streams = kvp.Value })
+            .ToList();
+    }
 
     private List<AudioDeviceInfo> SnapshotDevices() =>
         _watcher?.KnownDevices.Values.Select(d => new AudioDeviceInfo

@@ -94,6 +94,18 @@ publish_project() {
         -v quiet
 }
 
+publish_project_slim() {
+    local project="$1"
+    local name="$2"
+    echo "  Publishing $name..."
+    dotnet publish "$PROJECT_ROOT/src/$project/$project.csproj" \
+        --configuration "$CONFIG" \
+        --runtime "$RID" \
+        -p:PublishTrimmed=true \
+        --output "$INSTALL_LIB/$name" \
+        -v quiet
+}
+
 publish_project "VolMon.Daemon" "daemon"
 publish_project "VolMon.GUI"    "gui"
 publish_project "VolMon.CLI"    "cli"

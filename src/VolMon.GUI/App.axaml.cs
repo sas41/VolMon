@@ -1,9 +1,11 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
+using System.Threading.Tasks;
 using Avalonia.Markup.Xaml;
 using Avalonia.Platform;
 using Avalonia.Threading;
+using System.Linq;
 using VolMon.Core.Config;
 using VolMon.GUI.Services;
 using VolMon.GUI.Services.Overlay;
@@ -16,6 +18,7 @@ public class App : Application
 {
     private GlobalHotkeyService? _hotkeyService;
     private OverlayWindow? _overlayWindow;
+    private IClassicDesktopStyleApplicationLifetime? _desktopLifetime;
 
     public override void Initialize()
     {
@@ -26,6 +29,10 @@ public class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            // Keep a reference for graceful OS shutdown handling
+            _desktopLifetime = desktop;
+            // Ensure VolMon exits quickly when the OS requests shutdown
+            desktop.ShutdownRequested += OnShutdownRequested;
             var mainWindow = new MainWindow();
             desktop.MainWindow = mainWindow;
 
@@ -132,5 +139,22 @@ public class App : Application
             try { await _hotkeyService.StartAsync(); }
             catch { /* hook may fail in some environments (e.g. Wayland without permissions) */ }
         }
+    }
+
+    private async void OnShutdownRequested(object? sender, ShutdownRequestedEventArgs e)
+    {
+        if (_desktopLifetime != null)
+        {
+            foreach (var win in _desktopLifetime.Windows.ToArray())
+            {
+                win.Close();
+            }
+        }
+        _hotkeyService?.Dispose();
+        if (_overlayWindow != null)
+        {
+            _overlayWindow.Close();
+        }
+        _desktopLifetime?.Shutdown();
     }
 }

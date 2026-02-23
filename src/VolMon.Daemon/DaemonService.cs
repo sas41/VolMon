@@ -41,8 +41,6 @@ public sealed class DaemonService : BackgroundService
         {
             // Load config
             await _configManager.LoadAsync(stoppingToken);
-            await EnsureGroupIdsAsync(stoppingToken);
-            await MigrateIgnoredGroupAsync(stoppingToken);
             _configManager.StartWatching();
             _configManager.StartPeriodicSave();
             _configManager.ConfigChanged += OnConfigChanged;
@@ -681,50 +679,6 @@ public sealed class DaemonService : BackgroundService
         }).ToList() ?? [];
 
     // ── Helpers ──────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Migrates old configs that stored ignored programs as a special AudioGroup
-    /// into the new IgnoredPrograms list on VolMonConfig, then removes the group.
-    /// </summary>
-    private async Task MigrateIgnoredGroupAsync(CancellationToken ct)
-    {
-        // Find any legacy ignored group (from old configs that had IsIgnored on AudioGroup).
-        // Since we removed IsIgnored from AudioGroup, we detect it by name convention.
-        var legacyIgnored = _configManager.Config.Groups
-            .FirstOrDefault(g => g.Name.Equals("Ignored", StringComparison.OrdinalIgnoreCase)
-                               && g.Volume == 0);
-        if (legacyIgnored is null) return;
-
-        // Migrate its Programs into IgnoredPrograms
-        foreach (var prog in legacyIgnored.Programs)
-        {
-            if (!_configManager.Config.IgnoredPrograms.Contains(prog, StringComparer.OrdinalIgnoreCase))
-                _configManager.Config.IgnoredPrograms.Add(prog);
-        }
-
-        _configManager.Config.Groups.Remove(legacyIgnored);
-        await _configManager.SaveAsync(ct);
-        _logger.LogInformation("Migrated legacy Ignored group to IgnoredPrograms list");
-    }
-
-    /// <summary>
-    /// Assigns GUIDs to any groups that don't have one (migration from name-based config).
-    /// </summary>
-    private async Task EnsureGroupIdsAsync(CancellationToken ct)
-    {
-        var needsSave = false;
-        foreach (var group in _configManager.Config.Groups)
-        {
-            if (group.Id == Guid.Empty)
-            {
-                group.Id = Guid.NewGuid();
-                needsSave = true;
-                _logger.LogInformation("Assigned GUID {Id} to group '{Name}'", group.Id, group.Name);
-            }
-        }
-        if (needsSave)
-            await _configManager.SaveAsync(ct);
-    }
 
     /// <summary>
     /// Resolves a group from an IPC request. Prefers GroupId, falls back to GroupName.

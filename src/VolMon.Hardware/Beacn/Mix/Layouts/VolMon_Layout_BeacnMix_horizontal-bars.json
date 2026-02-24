@@ -1,0 +1,69 @@
+{
+  "width": 800,
+  "height": 480,
+  "background": "#1E1E1E",
+  "jpegQuality": 50,
+  "slots": [
+    {
+      "repeat": "0-3",
+      "repeatOffsetY": "120",
+      "children": [
+        {
+          "type": "line",
+          "x": "0", "y": "120", "w": "800", "h": "0",
+          "color": "#333333",
+          "strokeWidth": 1
+        },
+        {
+          "type": "rect",
+          "x": "0", "y": "0", "w": "6", "h": "120",
+          "fill": "{group.color}",
+          "radius": 0
+        },
+        {
+          "type": "text",
+          "x": "20", "y": "12", "w": "300",
+          "text": "{group.name}",
+          "color": "#FFFFFF",
+          "fontSize": 24,
+          "fontWeight": "bold",
+          "align": "left"
+        },
+        {
+          "type": "text",
+          "x": "680", "y": "12", "w": "100",
+          "text": "{group.volume}%",
+          "color": "#CCCCCC",
+          "fontSize": 22,
+          "align": "right"
+        },
+        {
+          "type": "bar",
+          "x": "20", "y": "52", "w": "680", "h": "28",
+          "value": "{group.volume}",
+          "color": "{group.color}",
+          "trackColor": "#333333",
+          "direction": "right",
+          "radius": 6
+        },
+        {
+          "type": "checkbox",
+          "x": "730", "y": "52",
+          "checked": "{group.muted}",
+          "label": "",
+          "checkedColor": "#E63946",
+          "uncheckedColor": "#555555",
+          "fontSize": 14
+        },
+        {
+          "type": "text",
+          "x": "20", "y": "88", "w": "300",
+          "text": "Dial {group.dial}",
+          "color": "#555555",
+          "fontSize": 14,
+          "align": "left"
+        }
+      ]
+    }
+  ]
+}

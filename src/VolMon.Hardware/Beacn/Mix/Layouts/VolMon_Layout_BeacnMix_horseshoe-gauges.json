@@ -1,0 +1,102 @@
+{
+  "width": 800,
+  "height": 480,
+  "background": "#111111",
+  "jpegQuality": 50,
+  "slots": [
+    {
+      "type": "line",
+      "x": "200", "y": "20", "w": "0", "h": "440",
+      "color": "#1A1A1A",
+      "strokeWidth": 1
+    },
+    {
+      "type": "line",
+      "x": "400", "y": "20", "w": "0", "h": "440",
+      "color": "#1A1A1A",
+      "strokeWidth": 1
+    },
+    {
+      "type": "line",
+      "x": "600", "y": "20", "w": "0", "h": "440",
+      "color": "#1A1A1A",
+      "strokeWidth": 1
+    },
+    {
+      "repeat": "0-3",
+      "repeatOffsetX": "200",
+      "children": [
+        {
+          "type": "text",
+          "x": "0", "y": "14", "w": "200",
+          "text": "{group.name}",
+          "color": "#DDDDDD",
+          "fontSize": 20,
+          "fontWeight": "bold",
+          "align": "center"
+        },
+        {
+          "type": "rect",
+          "x": "60", "y": "46", "w": "80", "h": "3",
+          "fill": "{group.color}",
+          "radius": 2
+        },
+        {
+          "type": "arc",
+          "x": "20", "y": "70", "w": "160", "h": "160",
+          "value": "{group.volume}",
+          "color": "{group.color}",
+          "trackColor": "#222222",
+          "strokeWidth": 12,
+          "startAngle": 120,
+          "sweepAngle": 300
+        },
+        {
+          "type": "text",
+          "x": "0", "y": "120", "w": "200",
+          "text": "{group.volume}",
+          "color": "#FFFFFF",
+          "fontSize": 52,
+          "fontWeight": "bold",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "x": "0", "y": "180", "w": "200",
+          "text": "%",
+          "color": "#666666",
+          "fontSize": 18,
+          "align": "center"
+        },
+        {
+          "type": "arc",
+          "x": "30", "y": "80", "w": "140", "h": "140",
+          "value": "{group.volume}",
+          "color": "{group.color}",
+          "trackColor": "#111111",
+          "strokeWidth": 3,
+          "startAngle": 120,
+          "sweepAngle": 300,
+          "opacity": 0.15
+        },
+        {
+          "type": "checkbox",
+          "x": "100", "y": "252",
+          "checked": "{group.muted}",
+          "label": "Muted",
+          "checkedColor": "#E63946",
+          "uncheckedColor": "#444444",
+          "fontSize": 14
+        },
+        {
+          "type": "text",
+          "x": "0", "y": "300", "w": "200",
+          "text": "Dial {group.dial}",
+          "color": "#333333",
+          "fontSize": 13,
+          "align": "center"
+        }
+      ]
+    }
+  ]
+}

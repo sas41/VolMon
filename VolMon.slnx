@@ -4,5 +4,6 @@
     <Project Path="src/VolMon.Core/VolMon.Core.csproj" />
     <Project Path="src/VolMon.Daemon/VolMon.Daemon.csproj" />
     <Project Path="src/VolMon.GUI/VolMon.GUI.csproj" />
+    <Project Path="src/VolMon.Hardware/VolMon.Hardware.csproj" />
   </Folder>
 </Solution>

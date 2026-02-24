@@ -39,7 +39,7 @@
                     FontSize="18" Padding="6,2"
                     Background="Transparent" Foreground="#888"
                     VerticalAlignment="Center" Margin="6,0,0,0"
-                    ToolTip.Tip="Shortcut Settings" />
+                    ToolTip.Tip="Settings" />
 
             <Button Content="Add" Command="{Binding AddGroupCommand}"
                     DockPanel.Dock="Right" Padding="10,4" />
@@ -96,6 +96,54 @@
                 </ItemsControl>
                 <TextBlock Text="Click a key button, then press the desired key to rebind."
                            Foreground="#666" FontSize="10" Margin="0,4,0,0" />
+
+                <!-- ─── Service Settings ─── -->
+                <Border BorderBrush="#444" BorderThickness="0,1,0,0"
+                        Margin="0,8,0,0" Padding="0,8,0,0">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="SERVICE SETTINGS" Foreground="#AAAAAA"
+                                   FontWeight="SemiBold" FontSize="11" Margin="0,0,0,4" />
+
+                        <Grid ColumnDefinitions="180,*" RowDefinitions="Auto,Auto,Auto" Margin="0,2">
+                            <!-- Daemon autostart -->
+                            <TextBlock Grid.Row="0" Grid.Column="0"
+                                       Text="Start daemon on login"
+                                       Foreground="#CCC" FontSize="12"
+                                       VerticalAlignment="Center" />
+                            <ToggleSwitch Grid.Row="0" Grid.Column="1"
+                                          IsChecked="{Binding DaemonAutostart}"
+                                          IsEnabled="{Binding ServiceStatusKnown}"
+                                          OnContent="" OffContent=""
+                                          VerticalAlignment="Center"
+                                          Margin="0,0,0,0" />
+
+                            <!-- GUI autostart -->
+                            <TextBlock Grid.Row="1" Grid.Column="0"
+                                       Text="Start GUI on login"
+                                       Foreground="#CCC" FontSize="12"
+                                       VerticalAlignment="Center" Margin="0,4,0,0" />
+                            <ToggleSwitch Grid.Row="1" Grid.Column="1"
+                                          IsChecked="{Binding GuiAutostart}"
+                                          IsEnabled="{Binding ServiceStatusKnown}"
+                                          OnContent="" OffContent=""
+                                          VerticalAlignment="Center"
+                                          Margin="0,4,0,0" />
+
+                            <!-- Restart daemon -->
+                            <TextBlock Grid.Row="2" Grid.Column="0"
+                                       Text="Restart daemon"
+                                       Foreground="#CCC" FontSize="12"
+                                       VerticalAlignment="Center" Margin="0,6,0,0" />
+                            <Button Grid.Row="2" Grid.Column="1"
+                                    Content="Restart"
+                                    Command="{Binding RestartDaemonCommand}"
+                                    Padding="10,3" FontSize="11"
+                                    Background="#555" Foreground="White"
+                                    VerticalAlignment="Center"
+                                    Margin="0,6,0,0" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
             </StackPanel>
         </Border>
 

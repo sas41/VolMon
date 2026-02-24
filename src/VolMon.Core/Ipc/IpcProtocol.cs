@@ -137,6 +137,9 @@ public sealed class IpcRequest
 
     /// <summary>Ordered list of group names (for reorder-groups).</summary>
     public List<string>? GroupOrder { get; init; }
+
+    /// <summary>Boolean toggle value (for set-daemon-autostart, set-gui-autostart).</summary>
+    public bool? Enabled { get; init; }
 }
 
 /// <summary>
@@ -204,6 +207,16 @@ public sealed class DaemonStatus
     public int ActiveDevices { get; init; }
     public int ConfiguredGroups { get; init; }
     public DateTime StartedAt { get; init; }
+    public ServiceStatus? Service { get; init; }
+}
+
+/// <summary>
+/// Platform service registration status (autostart, etc.).
+/// </summary>
+public sealed class ServiceStatus
+{
+    public bool DaemonAutostartEnabled { get; init; }
+    public bool GuiAutostartEnabled { get; init; }
 }
 
 /// <summary>

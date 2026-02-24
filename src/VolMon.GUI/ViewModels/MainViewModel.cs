@@ -145,6 +145,53 @@ public class MainViewModel : ReactiveObject
         set => this.RaiseAndSetIfChanged(ref _showSettings, value);
     }
 
+    // ── Service management ───────────────────────────────────────────
+    private bool _daemonAutostart;
+    private bool _guiAutostart;
+    private bool _serviceStatusKnown;
+
+    public bool DaemonAutostart
+    {
+        get => _daemonAutostart;
+        set
+        {
+            if (_daemonAutostart == value) return;
+            this.RaiseAndSetIfChanged(ref _daemonAutostart, value);
+            _ = SendCommandAsync(new IpcRequest
+            {
+                Command = "set-daemon-autostart",
+                Enabled = value
+            });
+        }
+    }
+
+    public bool GuiAutostart
+    {
+        get => _guiAutostart;
+        set
+        {
+            if (_guiAutostart == value) return;
+            this.RaiseAndSetIfChanged(ref _guiAutostart, value);
+            _ = SendCommandAsync(new IpcRequest
+            {
+                Command = "set-gui-autostart",
+                Enabled = value
+            });
+        }
+    }
+
+    /// <summary>
+    /// True once we've received at least one service status from the daemon,
+    /// so the UI can show the toggles instead of a "loading" state.
+    /// </summary>
+    public bool ServiceStatusKnown
+    {
+        get => _serviceStatusKnown;
+        private set => this.RaiseAndSetIfChanged(ref _serviceStatusKnown, value);
+    }
+
+    public ReactiveCommand<Unit, Unit> RestartDaemonCommand { get; }
+
     public ObservableCollection<ShortcutBindingViewModel> ShortcutBindings { get; } = [];
 
     public ReactiveCommand<Unit, Unit> ToggleSettingsCommand { get; }
@@ -166,6 +213,8 @@ public class MainViewModel : ReactiveObject
         {
             ShowSettings = !ShowSettings;
         });
+
+        RestartDaemonCommand = ReactiveCommand.CreateFromTask(RestartDaemonAsync);
 
         _ = LoadShortcutBindingsAsync();
         _ = ConnectAsync();
@@ -281,6 +330,9 @@ public class MainViewModel : ReactiveObject
             DaemonStatusText = "Running";
             DaemonStatusColor = Brushes.Green;
             StatusSummary = $"Streams: {status.ActiveStreams}  |  Devices: {status.ActiveDevices}  |  Groups: {status.ConfiguredGroups}";
+
+            if (status.Service is { } svc)
+                SyncServiceStatus(svc);
         }
 
         // ── Groups
@@ -603,6 +655,35 @@ public class MainViewModel : ReactiveObject
     {
         binding.KeyCode = "";
         await SaveShortcutsAsync();
+    }
+
+    // ── Service management ────────────────────────────────────────────
+
+    private async Task RestartDaemonAsync()
+    {
+        await SendCommandAsync(new IpcRequest { Command = "restart-daemon" });
+    }
+
+    /// <summary>
+    /// Updates the service toggle backing fields from a daemon status push
+    /// WITHOUT triggering the setters (which would send IPC commands).
+    /// </summary>
+    private void SyncServiceStatus(ServiceStatus svc)
+    {
+        if (_daemonAutostart != svc.DaemonAutostartEnabled)
+        {
+            _daemonAutostart = svc.DaemonAutostartEnabled;
+            this.RaisePropertyChanged(nameof(DaemonAutostart));
+        }
+        if (_guiAutostart != svc.GuiAutostartEnabled)
+        {
+            _guiAutostart = svc.GuiAutostartEnabled;
+            this.RaisePropertyChanged(nameof(GuiAutostart));
+        }
+        if (!_serviceStatusKnown)
+        {
+            ServiceStatusKnown = true;
+        }
     }
 
     // ── Drag-drop ────────────────────────────────────────────────────

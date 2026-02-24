@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using VolMon.Core.Audio;
 using VolMon.Core.Config;
 using VolMon.Core.Ipc;
+using VolMon.Core.Platform;
 
 namespace VolMon.Daemon;
 
@@ -14,6 +15,8 @@ public sealed class DaemonService : BackgroundService
 {
     private readonly IAudioBackend _backend;
     private readonly ConfigManager _configManager;
+    private readonly IServiceManager _serviceManager;
+    private readonly IHostApplicationLifetime _appLifetime;
     private readonly ILogger<DaemonService> _logger;
     private readonly ILogger<StreamWatcher> _watcherLogger;
     private readonly DateTime _startedAt = DateTime.UtcNow;
@@ -24,11 +27,15 @@ public sealed class DaemonService : BackgroundService
     public DaemonService(
         IAudioBackend backend,
         ConfigManager configManager,
+        IServiceManager serviceManager,
+        IHostApplicationLifetime appLifetime,
         ILogger<DaemonService> logger,
         ILogger<StreamWatcher> watcherLogger)
     {
         _backend = backend;
         _configManager = configManager;
+        _serviceManager = serviceManager;
+        _appLifetime = appLifetime;
         _logger = logger;
         _watcherLogger = watcherLogger;
     }
@@ -149,7 +156,10 @@ public sealed class DaemonService : BackgroundService
                 "set-group-color" => await HandleSetGroupColorAsync(request, ct),
                 "rename-group" => await HandleRenameGroupAsync(request, ct),
                 "reorder-groups" => await HandleReorderGroupsAsync(request, ct),
-                "status" => HandleStatus(),
+                "set-daemon-autostart" => await HandleSetDaemonAutostartAsync(request),
+                "set-gui-autostart" => await HandleSetGuiAutostartAsync(request),
+                "restart-daemon" => await HandleRestartDaemonAsync(),
+                "status" => await HandleStatusAsync(),
                 "reload" => await HandleReloadAsync(ct),
                 _ => new IpcResponse { Success = false, Error = $"Unknown command: {request.Command}" }
             };
@@ -180,7 +190,8 @@ public sealed class DaemonService : BackgroundService
         "toggle-skip-shortcut" or "toggle-group-mode" or
         "ignore-program" or "unignore-program" or
         "move-group" or "set-group-color" or "rename-group" or
-        "reorder-groups" or "reload" => true,
+        "reorder-groups" or "reload" or
+        "set-daemon-autostart" or "set-gui-autostart" => true,
         _ => false
     };
 
@@ -195,7 +206,7 @@ public sealed class DaemonService : BackgroundService
 
         try
         {
-            var evt = BuildStateEvent();
+            var evt = await BuildStateEventAsync();
             await _ipcServer.BroadcastAsync(evt);
         }
         catch (Exception ex)
@@ -204,10 +215,10 @@ public sealed class DaemonService : BackgroundService
         }
     }
 
-    private IpcEvent BuildStateEvent() => new()
+    private async Task<IpcEvent> BuildStateEventAsync() => new()
     {
         Name = "state-changed",
-        Status = BuildStatus(),
+        Status = await BuildStatusAsync(),
         Groups = _configManager.Config.Groups,
         Processes = SnapshotProcesses(),
         Devices = SnapshotDevices(),
@@ -600,10 +611,10 @@ public sealed class DaemonService : BackgroundService
         return new IpcResponse { Success = true };
     }
 
-    private IpcResponse HandleStatus() => new()
+    private async Task<IpcResponse> HandleStatusAsync() => new()
     {
         Success = true,
-        Status = BuildStatus(),
+        Status = await BuildStatusAsync(),
         Groups = _configManager.Config.Groups,
         Processes = SnapshotProcesses(),
         Devices = SnapshotDevices(),
@@ -619,6 +630,65 @@ public sealed class DaemonService : BackgroundService
         return new IpcResponse { Success = true };
     }
 
+    // ── Service management handlers ─────────────────────────────────
+
+    private async Task<IpcResponse> HandleSetDaemonAutostartAsync(IpcRequest request)
+    {
+        if (request.Enabled is not bool enabled)
+            return new IpcResponse { Success = false, Error = "Missing 'enabled' field" };
+
+        try
+        {
+            await _serviceManager.SetDaemonAutostartAsync(enabled);
+            return new IpcResponse { Success = true };
+        }
+        catch (Exception ex)
+        {
+            return new IpcResponse { Success = false, Error = ex.Message };
+        }
+    }
+
+    private async Task<IpcResponse> HandleSetGuiAutostartAsync(IpcRequest request)
+    {
+        if (request.Enabled is not bool enabled)
+            return new IpcResponse { Success = false, Error = "Missing 'enabled' field" };
+
+        try
+        {
+            await _serviceManager.SetGuiAutostartAsync(enabled);
+            return new IpcResponse { Success = true };
+        }
+        catch (Exception ex)
+        {
+            return new IpcResponse { Success = false, Error = ex.Message };
+        }
+    }
+
+    private async Task<IpcResponse> HandleRestartDaemonAsync()
+    {
+        try
+        {
+            var supported = await _serviceManager.RestartDaemonAsync();
+            if (!supported)
+                return new IpcResponse { Success = false, Error = "Restart not supported on this platform" };
+
+            // The service manager will start a new daemon process.
+            // Stop the current one gracefully after a brief delay so the
+            // IPC response can be sent back to the client first.
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(500);
+                _appLifetime.StopApplication();
+            });
+
+            return new IpcResponse { Success = true };
+        }
+        catch (Exception ex)
+        {
+            return new IpcResponse { Success = false, Error = ex.Message };
+        }
+    }
+
     // ── Snapshot helpers ────────────────────────────────────────────
 
     /// <summary>Cached lowercase device-type strings to avoid ToString + ToLowerInvariant per device.</summary>
@@ -628,14 +698,32 @@ public sealed class DaemonService : BackgroundService
         [DeviceType.Source] = "source"
     };
 
-    private DaemonStatus BuildStatus() => new()
+    private async Task<DaemonStatus> BuildStatusAsync()
     {
-        Running = true,
-        ActiveStreams = _watcher?.ActiveStreams.Count ?? 0,
-        ActiveDevices = _watcher?.KnownDevices.Count ?? 0,
-        ConfiguredGroups = _configManager.Config.Groups.Count,
-        StartedAt = _startedAt
-    };
+        ServiceStatus? svc = null;
+        try
+        {
+            svc = new ServiceStatus
+            {
+                DaemonAutostartEnabled = await _serviceManager.IsDaemonAutostartEnabledAsync(),
+                GuiAutostartEnabled = await _serviceManager.IsGuiAutostartEnabledAsync()
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to query service status");
+        }
+
+        return new DaemonStatus
+        {
+            Running = true,
+            ActiveStreams = _watcher?.ActiveStreams.Count ?? 0,
+            ActiveDevices = _watcher?.KnownDevices.Count ?? 0,
+            ConfiguredGroups = _configManager.Config.Groups.Count,
+            StartedAt = _startedAt,
+            Service = svc
+        };
+    }
 
     /// <summary>
     /// Builds the process list for IPC. Each entry is one binary name; streams

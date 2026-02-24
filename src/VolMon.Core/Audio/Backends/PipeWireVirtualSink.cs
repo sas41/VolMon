@@ -189,9 +189,12 @@ internal sealed class PipeWireVirtualSink : IDisposable
             // 7. Initial sync — enumerate existing graph ──────────────
             PwSync();
 
-            // 8. Destroy any stale volmon_compat_* Audio/Sink nodes ───
+            // 8. Destroy any stale node with the SAME name as ours ─────
+            //    Only clean up a leftover from a previous crashed daemon
+            //    that used the exact same sink name. Other groups' virtual
+            //    sinks (different names) are left untouched.
             var stale = _nodes
-                .Where(n => n.Name.StartsWith("volmon_compat_", StringComparison.Ordinal)
+                .Where(n => string.Equals(n.Name, NodeName, StringComparison.Ordinal)
                          && n.MediaClass == "Audio/Sink")
                 .ToList();
             foreach (var node in stale)

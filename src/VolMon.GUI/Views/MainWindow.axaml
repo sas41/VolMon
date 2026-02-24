@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:VolMon.GUI.ViewModels"
+        xmlns:conv="using:VolMon.GUI.Converters"
         x:Class="VolMon.GUI.Views.MainWindow"
         Title="VolMon - Volume Monitoring and Control"
         Icon="avares://VolMon.GUI/Assets/VolMonLogo.png"
@@ -141,10 +142,18 @@
                                                    IsVisible="{Binding IsDefault}"
                                                    ToolTip.Tip="Default group" />
 
+                                        <!-- Compatibility Mode shield — Linux only, visible when Mode = Compatibility -->
+                                        <TextBlock DockPanel.Dock="Right"
+                                                   Text="&#x1F6E1;"
+                                                   FontSize="10"
+                                                   VerticalAlignment="Center"
+                                                   Margin="0,0,2,0"
+                                                   IsVisible="{Binding Mode, Converter={x:Static conv:CompatModeVisibilityConverter.Instance}}"
+                                                   ToolTip.Tip="Compatibility Mode: app volume sliders have no effect" />
+
                                         <!-- Skip-shortcut X — visible only when SkipShortcut (left edge) -->
                                         <TextBlock DockPanel.Dock="Left"
-                                                   Text="&#x2715;"
-                                                   Foreground="#888"
+                                                   Text="&#x274C;"
                                                    FontSize="10"
                                                    VerticalAlignment="Center"
                                                    Margin="0,0,3,0"

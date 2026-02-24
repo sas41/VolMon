@@ -7,6 +7,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using VolMon.Core.Audio;
 using VolMon.GUI.ViewModels;
 
 namespace VolMon.GUI.Views;
@@ -272,6 +273,36 @@ public partial class MainWindow : Window
             groupVm.ToggleSkipShortcut();
         };
 
+        // Mode toggle: Direct (⚡) ↔ Compatibility (🛡)
+        // Only PulseAudio/PipeWire (Linux) supports virtual null-sinks.
+        Button? modeBtn = null;
+        if (OperatingSystem.IsLinux())
+        {
+            var modeIsCompat = groupVm.Mode == GroupMode.Compatibility;
+            var modeLabel = modeIsCompat
+                ? "\uD83D\uDEE1 Compatibility Mode (on)"
+                : "\u26A1 Direct Mode (on)";
+            modeBtn = new Button
+            {
+                Content = modeLabel,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                Background = Brushes.Transparent,
+                Foreground = modeIsCompat
+                    ? SolidColorBrush.Parse("#4FC3F7")
+                    : SolidColorBrush.Parse("#CCC"),
+                Padding = new Thickness(8, 4),
+            };
+            ToolTip.SetTip(modeBtn, modeIsCompat
+                ? "Compatibility Mode: streams are routed through a virtual device.\nThe app's own volume slider has no effect."
+                : "Direct Mode: VolMon sets the stream volume directly.\nSwitch to Compatibility Mode to prevent app volume sliders from interfering.");
+            modeBtn.Click += (_, _) =>
+            {
+                flyout?.Hide();
+                groupVm.ToggleMode();
+            };
+        }
+
         var deleteBtn = new Button
         {
             Content = "Delete",
@@ -287,14 +318,17 @@ public partial class MainWindow : Window
             groupVm.DeleteCommand.Execute().Subscribe();
         };
 
+        var menuPanel = new StackPanel { Width = 150, Spacing = 2 };
+        menuPanel.Children.Add(renameBtn);
+        menuPanel.Children.Add(defaultBtn);
+        menuPanel.Children.Add(skipBtn);
+        if (modeBtn is not null)
+            menuPanel.Children.Add(modeBtn);
+        menuPanel.Children.Add(deleteBtn);
+
         flyout = new Flyout
         {
-            Content = new StackPanel
-            {
-                Width = 150,
-                Spacing = 2,
-                Children = { renameBtn, defaultBtn, skipBtn, deleteBtn }
-            },
+            Content = menuPanel,
             Placement = PlacementMode.BottomEdgeAlignedRight,
         };
         flyout.ShowAt(anchor);

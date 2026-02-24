@@ -34,4 +34,12 @@ public sealed class MacOsBackend : IAudioBackend
 
     public Task<IReadOnlyList<AudioProcess>> GetProcessesAsync(CancellationToken ct = default) =>
         Task.FromResult((IReadOnlyList<AudioProcess>)new List<AudioProcess>());
+
+    // CompatibilityMode not supported on macOS — would require a virtual audio driver.
+    public Task<uint?> CreateVirtualSinkAsync(string sinkName, string description, CancellationToken ct = default) =>
+        Task.FromResult<uint?>(null);
+    public Task DestroyVirtualSinkAsync(uint moduleIndex, CancellationToken ct = default) => Task.CompletedTask;
+    public Task MoveStreamToSinkAsync(string streamId, string sinkName, CancellationToken ct = default) => Task.CompletedTask;
+    public Task SetVirtualSinkVolumeAsync(string sinkName, int volume, CancellationToken ct = default) => Task.CompletedTask;
+    public Task SetVirtualSinkMuteAsync(string sinkName, bool muted, CancellationToken ct = default) => Task.CompletedTask;
 }

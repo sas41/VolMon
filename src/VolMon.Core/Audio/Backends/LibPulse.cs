@@ -394,6 +394,70 @@ internal static partial class LibPulse
     public static extern IntPtr pa_context_set_source_output_mute(IntPtr c,
         uint idx, int mute, pa_context_success_cb_t? cb, IntPtr userdata);
 
+    // ── Module management (for CompatibilityMode null-sink) ──────────
+
+    /// <summary>
+    /// Callback fired when <c>pa_context_load_module</c> completes.
+    /// <paramref name="idx"/> is the new module index on success,
+    /// or <c>PA_INVALID_INDEX</c> (uint.MaxValue) on failure.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void pa_context_index_cb_t(IntPtr c, uint idx, IntPtr userdata);
+
+    /// <summary>Loads a module by name and argument string. The result index is delivered to the callback.</summary>
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr pa_context_load_module(IntPtr c,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? argument,
+        pa_context_index_cb_t? cb, IntPtr userdata);
+
+    /// <summary>Unloads a previously loaded module by index.</summary>
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr pa_context_unload_module(IntPtr c,
+        uint idx, pa_context_success_cb_t? cb, IntPtr userdata);
+
+    // ── Module introspection (for stale-module cleanup on startup) ───
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct pa_module_info
+    {
+        public uint index;
+        public IntPtr name;       // const char*
+        public IntPtr argument;   // const char*
+        public uint n_used;
+        // pa_proplist* and padding follow — we don't need them
+        private IntPtr _proplist;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void pa_module_info_cb_t(
+        IntPtr c, IntPtr info, int eol, IntPtr userdata);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr pa_context_get_module_info_list(
+        IntPtr c, pa_module_info_cb_t cb, IntPtr userdata);
+
+    // ── Sink input routing ───────────────────────────────────────────
+
+    /// <summary>Moves a sink input to a different sink (identified by index).</summary>
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr pa_context_move_sink_input_by_index(IntPtr c,
+        uint idx, uint sink_idx, pa_context_success_cb_t? cb, IntPtr userdata);
+
+    /// <summary>Moves a sink input to a different sink (identified by name).</summary>
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr pa_context_move_sink_input_by_name(IntPtr c,
+        uint idx, [MarshalAs(UnmanagedType.LPUTF8Str)] string sink_name,
+        pa_context_success_cb_t? cb, IntPtr userdata);
+
+    // ── Sink info by name ────────────────────────────────────────────
+
+    /// <summary>Fetches info for a single sink by name.</summary>
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr pa_context_get_sink_info_by_name(IntPtr c,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+        pa_sink_info_cb_t cb, IntPtr userdata);
+
     // ── Operations ───────────────────────────────────────────────────
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]

@@ -52,6 +52,45 @@ public interface IAudioBackend : IDisposable
 
     // New: report per-process information (a process with its streams)
     Task<IReadOnlyList<AudioProcess>> GetProcessesAsync(CancellationToken ct = default);
+
+    // ── CompatibilityMode: virtual sink routing ───────────────────────
+
+    /// <summary>
+    /// Creates a null-sink virtual device named <paramref name="sinkName"/> and returns
+    /// the PA module index that owns it. Returns <c>null</c> if the backend does not
+    /// support virtual sinks (e.g. Windows, macOS stubs).
+    /// </summary>
+    Task<uint?> CreateVirtualSinkAsync(string sinkName, string description,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Destroys a virtual sink previously created with
+    /// <see cref="CreateVirtualSinkAsync"/>, identified by the module index
+    /// returned from that call.
+    /// </summary>
+    Task DestroyVirtualSinkAsync(uint moduleIndex, CancellationToken ct = default);
+
+    /// <summary>
+    /// Moves a sink input (stream) to the named sink.
+    /// Used to route a stream into a null-sink or back to the real hardware sink.
+    /// </summary>
+    Task MoveStreamToSinkAsync(string streamId, string sinkName,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Sets the volume (0–100) on a virtual sink by its node name, using the native
+    /// PipeWire API (<c>pw_node_set_param</c>) so that the DSP-level volume is actually
+    /// applied. The PA-compat <c>pa_context_set_sink_volume_by_name</c> path does not
+    /// write to the PipeWire node's volume prop and has no audible effect.
+    /// No-op on backends that do not support virtual sinks.
+    /// </summary>
+    Task SetVirtualSinkVolumeAsync(string sinkName, int volume, CancellationToken ct = default);
+
+    /// <summary>
+    /// Sets the mute state on a virtual sink by its node name via the native PipeWire API.
+    /// No-op on backends that do not support virtual sinks.
+    /// </summary>
+    Task SetVirtualSinkMuteAsync(string sinkName, bool muted, CancellationToken ct = default);
 }
 
 public sealed class AudioStreamEventArgs : EventArgs

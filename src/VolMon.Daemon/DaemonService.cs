@@ -142,6 +142,7 @@ public sealed class DaemonService : BackgroundService
                 "set-default-group" => await HandleSetDefaultGroupAsync(request, ct),
                 "unset-default-group" => await HandleUnsetDefaultGroupAsync(request, ct),
                 "toggle-skip-shortcut" => HandleToggleSkipShortcut(request),
+                "toggle-group-mode" => await HandleToggleGroupModeAsync(request, ct),
                 "ignore-program" => await HandleIgnoreProgramAsync(request, ct),
                 "unignore-program" => await HandleUnignoreProgramAsync(request, ct),
                 "move-group" => await HandleMoveGroupAsync(request, ct),
@@ -176,7 +177,7 @@ public sealed class DaemonService : BackgroundService
         "add-program" or "remove-program" or
         "add-device" or "remove-device" or
         "set-default-group" or "unset-default-group" or
-        "toggle-skip-shortcut" or
+        "toggle-skip-shortcut" or "toggle-group-mode" or
         "ignore-program" or "unignore-program" or
         "move-group" or "set-group-color" or "rename-group" or
         "reorder-groups" or "reload" => true,
@@ -537,6 +538,28 @@ public sealed class DaemonService : BackgroundService
 
         group.SkipShortcut = !group.SkipShortcut;
         _configManager.MarkDirty();
+        return new IpcResponse { Success = true };
+    }
+
+    private async Task<IpcResponse> HandleToggleGroupModeAsync(IpcRequest request, CancellationToken ct)
+    {
+        var group = ResolveGroup(request);
+        if (group is null)
+            return new IpcResponse { Success = false, Error = $"Group '{GroupLabel(request)}' not found" };
+
+        // Cycle: Direct → Compatibility → Direct
+        group.Mode = group.Mode == GroupMode.Direct
+            ? GroupMode.Compatibility
+            : GroupMode.Direct;
+
+        _configManager.MarkDirty();
+        _logger.LogInformation(
+            "Group '{Group}' mode changed to {Mode}", group.Name, group.Mode);
+
+        // Re-apply to reconcile virtual sinks and re-route streams.
+        if (_watcher is not null)
+            await _watcher.ReassignAllAsync(ct);
+
         return new IpcResponse { Success = true };
     }
 

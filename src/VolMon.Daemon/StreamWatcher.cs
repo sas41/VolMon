@@ -4,6 +4,11 @@ using VolMon.Core.Config;
 namespace VolMon.Daemon;
 
 /// <summary>
+/// Tracks the PA module index and stable sink name for a CompatibilityMode virtual sink.
+/// </summary>
+internal sealed record VirtualSinkInfo(uint ModuleIndex, string SinkName);
+
+/// <summary>
 /// Watches for audio stream and device events and applies group rules.
 /// New programs go to the default group. New hardware is left unassigned.
 /// </summary>
@@ -18,6 +23,15 @@ public sealed class StreamWatcher : IDisposable
 
     /// <summary>Cache of known devices, keyed by device name.</summary>
     private readonly Dictionary<string, AudioDevice> _knownDevices = [];
+
+    /// <summary>
+    /// Per-group virtual sink state for <see cref="GroupMode.Compatibility"/> groups.
+    /// Key: group ID. Value: the PA module index and stable sink name.
+    /// The virtual sink is created when a group's mode first becomes Compatibility
+    /// (or at startup for pre-configured groups) and destroyed when the mode reverts
+    /// to Direct or the group is deleted.
+    /// </summary>
+    private readonly Dictionary<Guid, VirtualSinkInfo> _virtualSinks = [];
 
     /// <summary>
     /// Last snapshot of running configured process names, used to detect
@@ -40,6 +54,16 @@ public sealed class StreamWatcher : IDisposable
     private CancellationTokenSource? _stateChangedDebounce;
     private const int StateChangedDebounceMs = 100;
 
+    // Name prefix for VolMon null-sink virtual devices.
+    private const string VirtualSinkPrefix = "volmon_compat_";
+
+    /// <summary>
+    /// When <c>true</c>, if the virtual sink is unavailable for a Compatibility group,
+    /// streams fall back to direct volume control. When <c>false</c>, streams are left
+    /// untouched and a warning is logged instead.
+    /// </summary>
+    private const bool FallbackToDirectVolume = false;
+
     public StreamWatcher(IAudioBackend backend, ConfigManager configManager, ILogger<StreamWatcher> logger)
     {
         _backend = backend;
@@ -54,9 +78,19 @@ public sealed class StreamWatcher : IDisposable
 
     /// <summary>
     /// Performs an initial scan of all active streams and devices, then applies group rules.
+    /// For groups in CompatibilityMode, a virtual null-sink is created first so that
+    /// any existing streams can be routed into it.
     /// </summary>
     public async Task InitialScanAsync(CancellationToken ct = default)
     {
+        // Create virtual sinks for all CompatibilityMode groups before scanning streams,
+        // so that ApplyStreamSettingsAsync can route new streams into them immediately.
+        foreach (var group in _configManager.Config.Groups)
+        {
+            if (group.Mode == GroupMode.Compatibility)
+                await EnsureVirtualSinkAsync(group, ct);
+        }
+
         // Scan streams
         var streams = await _backend.GetStreamsAsync(ct);
         foreach (var stream in streams)
@@ -153,29 +187,54 @@ public sealed class StreamWatcher : IDisposable
     }
 
     /// <summary>
-    /// Applies volume/mute settings to all streams and devices in the specified group.
+    /// Applies volume/mute settings to the specified group.
+    /// In CompatibilityMode the virtual sink volume is set via the native PipeWire API
+    /// and individual streams are left untouched; in Direct mode the stream volume is
+    /// set directly.
     /// </summary>
     public async Task ApplyGroupSettingsAsync(AudioGroup group, CancellationToken ct = default)
     {
-
-        // Snapshot to avoid "collection was modified" if pactl events fire concurrently
-        var streams = _activeStreams.Values.Where(s => s.AssignedGroup == group.Id).ToArray();
-        foreach (var stream in streams)
+        if (group.Mode == GroupMode.Compatibility)
         {
-            try
+            // Ensure the virtual sink exists (it may not if mode just changed).
+            await EnsureVirtualSinkAsync(group, ct);
+
+            if (_virtualSinks.TryGetValue(group.Id, out var vsink))
             {
-                await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
-                await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
-                stream.Volume = group.Volume;
-                stream.Muted = group.Muted;
+                // Control volume/mute on the virtual sink via the native PipeWire API.
+                // Individual stream volumes are left untouched.
+                try
+                {
+                    await _backend.SetVirtualSinkVolumeAsync(vsink.SinkName, group.Volume, ct);
+                    await _backend.SetVirtualSinkMuteAsync(vsink.SinkName, group.Muted, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to apply settings to virtual sink {SinkName}", vsink.SinkName);
+                }
             }
-            catch (Exception ex)
+        }
+        else
+        {
+            // Direct mode: set stream volume directly.
+            var streams = _activeStreams.Values.Where(s => s.AssignedGroup == group.Id).ToArray();
+            foreach (var stream in streams)
             {
-                _logger.LogDebug(ex, "Failed to apply settings to stream {StreamId} (transient; stream may still exist)", stream.Id);
+                try
+                {
+                    await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
+                    await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
+                    stream.Volume = group.Volume;
+                    stream.Muted = group.Muted;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to apply settings to stream {StreamId} (transient; stream may still exist)", stream.Id);
+                }
             }
         }
 
-        // Snapshot to avoid "collection was modified" if pactl events fire concurrently
+        // Devices are always controlled by direct volume regardless of mode.
         var devices = _knownDevices.Values.Where(d => d.AssignedGroup == group.Id).ToArray();
         foreach (var device in devices)
         {
@@ -195,15 +254,57 @@ public sealed class StreamWatcher : IDisposable
 
     /// <summary>
     /// Re-evaluates all active streams and devices against current group rules.
+    /// Reconciles CompatibilityMode virtual sinks: creates missing ones, destroys
+    /// ones no longer needed.
     /// </summary>
     public async Task ReassignAllAsync(CancellationToken ct = default)
     {
+        // Reconcile virtual sinks: create for Compatibility groups, destroy for Direct groups.
+        var currentCompatGroups = _configManager.Config.Groups
+            .Where(g => g.Mode == GroupMode.Compatibility)
+            .Select(g => g.Id)
+            .ToHashSet();
+
+        // Create sinks for newly Compatibility groups.
+        foreach (var group in _configManager.Config.Groups)
+        {
+            if (group.Mode == GroupMode.Compatibility)
+                await EnsureVirtualSinkAsync(group, ct);
+        }
+
+        // Destroy sinks for groups that are no longer Compatibility.
+        foreach (var (groupId, vsink) in _virtualSinks.ToArray())
+        {
+            if (!currentCompatGroups.Contains(groupId))
+                await TearDownVirtualSinkAsync(groupId, vsink, moveStreamsToDefault: true, ct);
+        }
+
         // Snapshot to avoid "collection was modified" if pactl events fire concurrently
         foreach (var stream in _activeStreams.Values.ToArray())
         {
+            var previousGroup = stream.AssignedGroup;
             stream.AssignedGroup = null;
             AssignStreamToGroup(stream);
             await ApplyStreamSettingsAsync(stream, ct);
+
+            // If the stream was previously in a Compatibility group's virtual sink
+            // but is now unassigned (e.g. moved to the ignored list), move it back
+            // to the default output sink so it doesn't stay stranded on the virtual sink.
+            if (stream.AssignedGroup is null
+                && previousGroup is not null
+                && _virtualSinks.ContainsKey(previousGroup.Value))
+            {
+                try
+                {
+                    await _backend.MoveStreamToSinkAsync(stream.Id, "@DEFAULT_SINK@", ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex,
+                        "Failed to move ignored stream {StreamId} back to default sink",
+                        stream.Id);
+                }
+            }
         }
 
         foreach (var device in _knownDevices.Values.ToArray())
@@ -259,6 +360,7 @@ public sealed class StreamWatcher : IDisposable
                 stream.AssignedGroup = existing.AssignedGroup;
 
             _activeStreams[e.StreamId] = stream;
+
             RaiseStateChanged();
         }
         catch (Exception ex)
@@ -359,14 +461,24 @@ public sealed class StreamWatcher : IDisposable
             g => g.Id == stream.AssignedGroup);
         if (group is null) return;
 
-
-
         try
         {
-            await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
-            await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
-            stream.Volume = group.Volume;
-            stream.Muted = group.Muted;
+            if (group.Mode == GroupMode.Compatibility)
+            {
+                await RouteStreamToVirtualSinkAsync(stream, group, ct);
+            }
+            else
+            {
+                // If this stream was previously routed to a virtual sink (e.g. it was
+                // just removed from a Compatibility group), move it back to the default
+                // output sink before applying direct volume control.
+                await _backend.MoveStreamToSinkAsync(stream.Id, "@DEFAULT_SINK@", ct);
+
+                await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
+                await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
+                stream.Volume = group.Volume;
+                stream.Muted = group.Muted;
+            }
         }
         catch (Exception ex)
         {
@@ -397,6 +509,145 @@ public sealed class StreamWatcher : IDisposable
             _logger.LogWarning(ex, "Failed to apply settings to device {DeviceName}", device.Name);
         }
     }
+
+    // ── CompatibilityMode: virtual sink helpers ───────────────────────
+
+    /// <summary>
+    /// Returns a stable, filesystem-safe sink name for the given group.
+    /// The GUID ensures uniqueness even if two groups share the same display name.
+    /// </summary>
+    private static string VirtualSinkNameFor(AudioGroup group) =>
+        $"{VirtualSinkPrefix}{group.Id:N}";
+
+    /// <summary>
+    /// Ensures a null-sink virtual device exists for <paramref name="group"/>.
+    /// If one is already tracked, this is a no-op. Otherwise the PA module is loaded
+    /// and the result recorded in <see cref="_virtualSinks"/>.
+    /// </summary>
+    private async Task EnsureVirtualSinkAsync(AudioGroup group, CancellationToken ct = default)
+    {
+        if (_virtualSinks.ContainsKey(group.Id)) return;
+
+        var sinkName = VirtualSinkNameFor(group);
+        _logger.LogInformation(
+            "Creating virtual null-sink '{SinkName}' for CompatibilityMode group '{Group}'",
+            sinkName, group.Name);
+
+        var moduleIndex = await _backend.CreateVirtualSinkAsync(
+            sinkName, $"VolMon: {group.Name}", ct);
+
+        if (moduleIndex is null)
+        {
+            _logger.LogWarning(
+                "Backend does not support virtual sinks — CompatibilityMode unavailable for group '{Group}'",
+                group.Name);
+            return;
+        }
+
+        _virtualSinks[group.Id] = new VirtualSinkInfo(moduleIndex.Value, sinkName);
+        _logger.LogInformation(
+            "Virtual sink '{SinkName}' created (handle {Idx}) for group '{Group}'",
+            sinkName, moduleIndex.Value, group.Name);
+
+        // Apply the current group volume to the new sink via the PulseAudio API.
+        try
+        {
+            await _backend.SetVirtualSinkVolumeAsync(sinkName, group.Volume, ct);
+            await _backend.SetVirtualSinkMuteAsync(sinkName, group.Muted, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to set initial volume on virtual sink '{SinkName}'", sinkName);
+        }
+    }
+
+    /// <summary>
+    /// Moves a stream into the group's virtual null-sink. The stream's individual
+    /// volume is left untouched — only the virtual sink's volume matters.
+    /// </summary>
+    private async Task RouteStreamToVirtualSinkAsync(
+        AudioStream stream, AudioGroup group, CancellationToken ct = default)
+    {
+        if (!_virtualSinks.TryGetValue(group.Id, out var vsink))
+        {
+            if (FallbackToDirectVolume)
+            {
+                // Sink not available — fall back to direct volume control.
+                await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
+                await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
+                stream.Volume = group.Volume;
+                stream.Muted = group.Muted;
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Virtual sink for group '{Group}' ({GroupId}) is not available; "
+                    + "stream {StreamId} left untouched",
+                    group.Name, group.Id, stream.Id);
+            }
+
+            return;
+        }
+
+        try
+        {
+            await _backend.MoveStreamToSinkAsync(stream.Id, vsink.SinkName, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex,
+                "Failed to route stream {StreamId} to virtual sink '{SinkName}'",
+                stream.Id, vsink.SinkName);
+        }
+    }
+
+    /// <summary>
+    /// Destroys a group's virtual null-sink and optionally moves all its streams
+    /// back to the system default sink.
+    /// </summary>
+    private async Task TearDownVirtualSinkAsync(
+        Guid groupId, VirtualSinkInfo vsink, bool moveStreamsToDefault, CancellationToken ct = default)
+    {
+        if (moveStreamsToDefault)
+        {
+            // Move all streams that are still inside this virtual sink back to the default.
+            var streams = _activeStreams.Values
+                .Where(s => s.AssignedGroup == groupId)
+                .ToArray();
+
+            foreach (var stream in streams)
+            {
+                try
+                {
+                    // "@DEFAULT_SINK@" is a PulseAudio magic name that always resolves
+                    // to the current default output sink.
+                    await _backend.MoveStreamToSinkAsync(stream.Id, "@DEFAULT_SINK@", ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex,
+                        "Failed to move stream {StreamId} back to default sink", stream.Id);
+                }
+            }
+        }
+
+        try
+        {
+            await _backend.DestroyVirtualSinkAsync(vsink.ModuleIndex, ct);
+            _logger.LogInformation(
+                "Destroyed virtual sink '{SinkName}' (module {Idx})",
+                vsink.SinkName, vsink.ModuleIndex);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to unload virtual sink module {Idx}", vsink.ModuleIndex);
+        }
+
+        _virtualSinks.Remove(groupId);
+    }
+
+    // ── Debounced state notification ─────────────────────────────────
 
     /// <summary>
     /// Debounces rapid StateChanged notifications. Multiple calls within
@@ -434,5 +685,12 @@ public sealed class StreamWatcher : IDisposable
         _backend.StreamRemoved -= OnStreamRemoved;
         _backend.StreamChanged -= OnStreamChanged;
         _backend.DeviceChanged -= OnDeviceChanged;
+
+        // Best-effort teardown of virtual sinks on shutdown (fire-and-forget).
+        foreach (var (groupId, vsink) in _virtualSinks.ToArray())
+        {
+            _ = TearDownVirtualSinkAsync(groupId, vsink, moveStreamsToDefault: true,
+                CancellationToken.None);
+        }
     }
 }

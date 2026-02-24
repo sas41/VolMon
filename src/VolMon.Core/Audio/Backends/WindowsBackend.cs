@@ -283,6 +283,14 @@ namespace VolMon.Core.Audio.Backends;
             return (IReadOnlyList<AudioProcess>)list;
         });
 
+    // CompatibilityMode not supported on Windows — WASAPI has no null-sink concept.
+    public Task<uint?> CreateVirtualSinkAsync(string sinkName, string description, CancellationToken ct = default) =>
+        Task.FromResult<uint?>(null);
+    public Task DestroyVirtualSinkAsync(uint moduleIndex, CancellationToken ct = default) => Task.CompletedTask;
+    public Task MoveStreamToSinkAsync(string streamId, string sinkName, CancellationToken ct = default) => Task.CompletedTask;
+    public Task SetVirtualSinkVolumeAsync(string sinkName, int volume, CancellationToken ct = default) => Task.CompletedTask;
+    public Task SetVirtualSinkMuteAsync(string sinkName, bool muted, CancellationToken ct = default) => Task.CompletedTask;
+
     /// <summary>
     /// Finds a session by stream ID (PID string) across already-tracked devices.
     /// Uses <see cref="_trackedDevices"/> to avoid re-enumerating all audio

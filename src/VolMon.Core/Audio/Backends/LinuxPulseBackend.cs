@@ -126,6 +126,68 @@ public sealed class LinuxPulseBackend : IAudioBackend
         };
         _mainloopRunning = true;
         _mainloopThread.Start();
+
+        // Clean up any stale VolMon modules left by a previous daemon run
+        // that crashed or was killed without running Dispose().
+        CleanUpStaleModules();
+    }
+
+    /// <summary>
+    /// Scans the loaded PA module list and unloads any legacy <c>module-null-sink</c>
+    /// or <c>module-loopback</c> instances whose argument strings reference a
+    /// <c>volmon_compat_</c> sink name — these were created by older daemon builds
+    /// that used the libpulse module approach and may have been left behind if
+    /// the daemon was killed without running Dispose().
+    /// </summary>
+    private void CleanUpStaleModules()
+    {
+        var staleIndices = new List<uint>();
+        var done = false;
+
+        pa_module_info_cb_t cb = (_, infoPtr, eol, _) =>
+        {
+            if (eol > 0)
+            {
+                done = true;
+                Monitor.PulseAll(_paLock);
+                return;
+            }
+            if (infoPtr == IntPtr.Zero) return;
+
+            var info = Marshal.PtrToStructure<pa_module_info>(infoPtr);
+            var name = PtrToStringUtf8(info.name) ?? "";
+            var args = PtrToStringUtf8(info.argument) ?? "";
+
+            if ((name == "module-null-sink" || name == "module-loopback")
+                && args.Contains(VirtualSinkPrefix, StringComparison.Ordinal))
+            {
+                staleIndices.Add(info.index);
+            }
+        };
+
+        PaLock();
+        try
+        {
+            var op = pa_context_get_module_info_list(_context, cb, IntPtr.Zero);
+            if (op == IntPtr.Zero) return; // non-fatal — best effort
+
+            while (!done)
+                PaWait();
+
+            pa_operation_unref(op);
+
+            foreach (var idx in staleIndices)
+            {
+                var unloadOp = pa_context_unload_module(_context, idx, null, IntPtr.Zero);
+                if (unloadOp != IntPtr.Zero) pa_operation_unref(unloadOp);
+            }
+        }
+        finally
+        {
+            PaUnlock();
+        }
+
+        GC.KeepAlive(cb);
     }
 
     /// <summary>
@@ -243,6 +305,7 @@ public sealed class LinuxPulseBackend : IAudioBackend
             var appName = proplist != IntPtr.Zero
                 ? PtrToStringUtf8(pa_proplist_gets(proplist, "application.name"))
                 : null;
+
             var pidStr = proplist != IntPtr.Zero
                 ? PtrToStringUtf8(pa_proplist_gets(proplist, "application.process.id"))
                 : null;
@@ -351,10 +414,16 @@ public sealed class LinuxPulseBackend : IAudioBackend
             if (infoPtr == IntPtr.Zero) return;
 
             var info = Marshal.PtrToStructure<pa_sink_info>(infoPtr);
+            var sinkName = PtrToStringUtf8(info.name) ?? "";
+
+            // Skip VolMon's own virtual null-sinks — they are internal to
+            // CompatibilityMode and should not appear as controllable devices.
+            if (sinkName.StartsWith(VirtualSinkPrefix, StringComparison.Ordinal)) return;
+
             devices.Add(new AudioDevice
             {
                 Id = info.index.ToString(),
-                Name = PtrToStringUtf8(info.name) ?? "",
+                Name = sinkName,
                 Description = PtrToStringUtf8(info.description),
                 Type = DeviceType.Sink,
                 Volume = CvolumeToPercent(ref info.volume),
@@ -642,6 +711,157 @@ public sealed class LinuxPulseBackend : IAudioBackend
         return null;
     }
 
+    // ── CompatibilityMode: virtual sink management ───────────────────
+
+    // Prefix used for all VolMon-created virtual filter sinks.
+    // Must match the prefix used by StreamWatcher.VirtualSinkNameFor().
+    private const string VirtualSinkPrefix = "volmon_compat_";
+
+    // Maps sink node-name → PipeWireVirtualSink instance so we can
+    // destroy it on demand.  Keyed by the node name string because
+    // IAudioBackend.CreateVirtualSinkAsync returns a uint? "module index"
+    // which we re-purpose here as a stable integer handle (the GC hash code
+    // of the object, kept in _virtualSinkByHandle).
+    private readonly Dictionary<string, PipeWireVirtualSink> _virtualSinks = new();
+    private readonly Dictionary<uint, PipeWireVirtualSink>   _virtualSinkByHandle = new();
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Creates a PipeWire <em>filter node</em> that acts as a virtual audio sink.
+    /// Because the node has <c>media.category=Filter</c> it is invisible to
+    /// GNOME's sound settings panel and pavucontrol's output device list —
+    /// it does not appear as a hardware sink to the user.
+    ///
+    /// PipeWire still exposes the filter as a PulseAudio-compatible sink via
+    /// the PipeWire-pulse compatibility layer, so
+    /// <c>pa_context_move_sink_input_by_name</c> routes streams into it normally.
+    ///
+    /// The returned <c>uint</c> is an opaque handle used as the argument to
+    /// <see cref="DestroyVirtualSinkAsync"/>. It has no meaning outside this class.
+    /// </remarks>
+    public Task<uint?> CreateVirtualSinkAsync(string sinkName, string description,
+        CancellationToken ct = default)
+    {
+        PipeWireVirtualSink sink;
+        try
+        {
+            sink = PipeWireVirtualSink.Create(sinkName, description);
+        }
+        catch (Exception ex)
+        {
+            // Log and return null to signal failure to the caller (StreamWatcher).
+            System.Diagnostics.Debug.WriteLine(
+                $"[VolMon] PipeWireVirtualSink.Create({sinkName}) failed: {ex.Message}");
+            return Task.FromResult<uint?>(null);
+        }
+
+        // Use the object's identity hash as a stable uint handle.
+        uint handle = (uint)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(sink);
+
+        _virtualSinks[sinkName] = sink;
+        _virtualSinkByHandle[handle] = sink;
+
+        return Task.FromResult<uint?>(handle);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Destroys the <see cref="PipeWireVirtualSink"/> identified by the handle
+    /// returned from <see cref="CreateVirtualSinkAsync"/>, stopping its thread loop
+    /// and disconnecting the filter node from the PipeWire graph.
+    /// </remarks>
+    public Task DestroyVirtualSinkAsync(uint moduleIndex, CancellationToken ct = default)
+    {
+        if (_virtualSinkByHandle.TryGetValue(moduleIndex, out var sink))
+        {
+            _virtualSinkByHandle.Remove(moduleIndex);
+            _virtualSinks.Remove(sink.NodeName);
+            sink.Dispose();
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc/>
+    public Task MoveStreamToSinkAsync(string streamId, string sinkName,
+        CancellationToken ct = default)
+    {
+        EnsureConnected();
+        if (!uint.TryParse(streamId, out var idx))
+            throw new ArgumentException($"Invalid stream ID: {streamId}", nameof(streamId));
+
+        PaLock();
+        try
+        {
+            var op = pa_context_move_sink_input_by_name(
+                _context, idx, sinkName, null, IntPtr.Zero);
+            if (op != IntPtr.Zero) pa_operation_unref(op);
+        }
+        finally
+        {
+            PaUnlock();
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Sets the virtual sink volume via the PulseAudio API
+    /// (<c>pa_context_set_sink_volume_by_name</c>) rather than the PipeWire native
+    /// <c>pw_node_set_param</c> API. The PA-compat layer correctly translates
+    /// <c>pa_cvolume</c> to PipeWire's <c>channelVolumes</c> property, which is the
+    /// property that determines the user-visible sink volume. The PipeWire native
+    /// <c>SPA_PROP_volume</c> is a separate master multiplier that does NOT affect
+    /// the PA-reported volume.
+    /// </remarks>
+    public Task SetVirtualSinkVolumeAsync(string sinkName, int volume,
+        CancellationToken ct = default)
+    {
+        EnsureConnected();
+        var cvol = PercentToCvolume(2, volume);
+
+        PaLock();
+        try
+        {
+            var op = pa_context_set_sink_volume_by_name(
+                _context, sinkName, ref cvol, null, IntPtr.Zero);
+            if (op != IntPtr.Zero) pa_operation_unref(op);
+        }
+        finally
+        {
+            PaUnlock();
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Sets the virtual sink mute state via the PulseAudio API
+    /// (<c>pa_context_set_sink_mute_by_name</c>) for the same reasons as
+    /// <see cref="SetVirtualSinkVolumeAsync"/>.
+    /// </remarks>
+    public Task SetVirtualSinkMuteAsync(string sinkName, bool muted,
+        CancellationToken ct = default)
+    {
+        EnsureConnected();
+
+        PaLock();
+        try
+        {
+            var op = pa_context_set_sink_mute_by_name(
+                _context, sinkName, muted ? 1 : 0, null, IntPtr.Zero);
+            if (op != IntPtr.Zero) pa_operation_unref(op);
+        }
+        finally
+        {
+            PaUnlock();
+        }
+
+        return Task.CompletedTask;
+    }
+
     // ── Dispose ──────────────────────────────────────────────────────
 
     public void Dispose()
@@ -649,6 +869,12 @@ public sealed class LinuxPulseBackend : IAudioBackend
         if (_disposed) return;
         _disposed = true;
         _ready = false;
+
+        // Tear down all remaining virtual sinks first (each owns a pw_thread_loop).
+        foreach (var sink in _virtualSinks.Values)
+            sink.Dispose();
+        _virtualSinks.Clear();
+        _virtualSinkByHandle.Clear();
 
         // Stop the managed mainloop thread.
         _mainloopRunning = false;

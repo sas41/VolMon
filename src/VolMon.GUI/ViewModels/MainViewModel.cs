@@ -835,6 +835,7 @@ public class GroupColumnViewModel : ReactiveObject
     private bool _muted;
     private bool _isDefault;
     private bool _skipShortcut;
+    private GroupMode _mode;
     private string _colorHex;
     private IBrush _colorBrush;
     private CancellationTokenSource? _volumeDebounce;
@@ -971,6 +972,26 @@ public class GroupColumnViewModel : ReactiveObject
         _ = _sendCommand(new IpcRequest { Command = "toggle-skip-shortcut", GroupId = Id });
     }
 
+    /// <summary>
+    /// The current volume control mode for this group
+    /// (<see cref="GroupMode.Direct"/> or <see cref="GroupMode.Compatibility"/>).
+    /// </summary>
+    public GroupMode Mode
+    {
+        get => _mode;
+        private set => this.RaiseAndSetIfChanged(ref _mode, value);
+    }
+
+    /// <summary>
+    /// Cycles the group mode (Direct ↔ Compatibility) and sends the command to the daemon.
+    /// The daemon creates or destroys the virtual null-sink as needed.
+    /// </summary>
+    public void ToggleMode()
+    {
+        Mode = _mode == GroupMode.Direct ? GroupMode.Compatibility : GroupMode.Direct;
+        _ = _sendCommand(new IpcRequest { Command = "toggle-group-mode", GroupId = Id });
+    }
+
     public ReactiveCommand<Unit, Unit> DeleteCommand { get; }
     public ReactiveCommand<string, Unit> ChangeColorCommand { get; }
 
@@ -995,6 +1016,7 @@ public class GroupColumnViewModel : ReactiveObject
         _muted = group.Muted;
         _isDefault = group.IsDefault;
         _skipShortcut = group.SkipShortcut;
+        _mode = group.Mode;
         _colorHex = colorHex;
 
         try { _colorBrush = SolidColorBrush.Parse(colorHex); }
@@ -1063,6 +1085,12 @@ public class GroupColumnViewModel : ReactiveObject
         {
             _skipShortcut = source._skipShortcut;
             this.RaisePropertyChanged(nameof(SkipShortcut));
+        }
+
+        if (_mode != source._mode)
+        {
+            _mode = source._mode;
+            this.RaisePropertyChanged(nameof(Mode));
         }
 
         if (_colorHex != source._colorHex)

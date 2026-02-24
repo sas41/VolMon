@@ -51,7 +51,7 @@ public sealed class StreamWatcher : IDisposable
     /// </summary>
     public event EventHandler? StateChanged;
 
-    private CancellationTokenSource? _stateChangedDebounce;
+    private Timer? _stateChangedTimer;
     private const int StateChangedDebounceMs = 100;
 
     // Name prefix for VolMon null-sink virtual devices.
@@ -681,35 +681,26 @@ public sealed class StreamWatcher : IDisposable
     /// <summary>
     /// Debounces rapid StateChanged notifications. Multiple calls within
     /// <see cref="StateChangedDebounceMs"/> are coalesced into one.
+    /// Uses a <see cref="Timer"/> to avoid <see cref="TaskCanceledException"/>
+    /// noise that <c>Task.Delay</c> + <c>CancellationToken</c> would generate
+    /// on every slider movement.
     /// </summary>
     private void RaiseStateChanged()
     {
-        var old = _stateChangedDebounce;
-        old?.Cancel();
-
-        var cts = new CancellationTokenSource();
-        _stateChangedDebounce = cts;
-        var ct = cts.Token;
-
-        old?.Dispose();
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(StateChangedDebounceMs, ct);
-                StateChanged?.Invoke(this, EventArgs.Empty);
-            }
-            catch (OperationCanceledException) { }
-        });
+        _stateChangedTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+        _stateChangedTimer?.Dispose();
+        _stateChangedTimer = new Timer(
+            _ => StateChanged?.Invoke(this, EventArgs.Empty),
+            state: null,
+            dueTime: StateChangedDebounceMs,
+            period: Timeout.Infinite);
     }
 
     public void Dispose()
     {
         _processPollCts?.Cancel();
         _processPollCts?.Dispose();
-        _stateChangedDebounce?.Cancel();
-        _stateChangedDebounce?.Dispose();
+        _stateChangedTimer?.Dispose();
         _backend.StreamCreated -= OnStreamCreated;
         _backend.StreamRemoved -= OnStreamRemoved;
         _backend.StreamChanged -= OnStreamChanged;

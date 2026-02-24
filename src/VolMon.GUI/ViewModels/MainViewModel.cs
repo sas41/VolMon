@@ -8,6 +8,7 @@ using VolMon.Core.Audio;
 using VolMon.Core.Config;
 using VolMon.Core.Ipc;
 using VolMon.GUI.Services;
+using Timer = System.Threading.Timer;
 
 namespace VolMon.GUI.ViewModels;
 
@@ -838,7 +839,8 @@ public class GroupColumnViewModel : ReactiveObject
     private GroupMode _mode;
     private string _colorHex;
     private IBrush _colorBrush;
-    private CancellationTokenSource? _volumeDebounce;
+    private Timer? _volumeDebounceTimer;
+    private volatile bool _volumeDebounceActive;
     private bool _muteSending;
 
     public Guid Id { get; }
@@ -871,37 +873,44 @@ public class GroupColumnViewModel : ReactiveObject
             this.RaiseAndSetIfChanged(ref _volume, value);
             this.RaisePropertyChanged(nameof(VolumeText));
 
-            var old = _volumeDebounce;
-            old?.Cancel();
+            _volumeDebounceActive = true;
 
-            var cts = new CancellationTokenSource();
-            _volumeDebounce = cts;
-            var ct = cts.Token;
-
-            old?.Dispose();
+            // Stop any pending timer, then start a fresh 80 ms one-shot.
+            // Using Timer instead of Task.Delay + CancellationToken avoids
+            // throwing TaskCanceledException on every slider movement.
+            _volumeDebounceTimer?.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+            _volumeDebounceTimer?.Dispose();
 
             var v = value;
-            _ = DebounceVolumeAsync(v, ct);
+            _volumeDebounceTimer = new Timer(
+                _ => FireDebouncedVolume(v),
+                state: null,
+                dueTime: 80,
+                period: System.Threading.Timeout.Infinite);
         }
     }
 
-    private async Task DebounceVolumeAsync(int volume, CancellationToken ct)
+    private async void FireDebouncedVolume(int volume)
     {
         try
         {
-            await Task.Delay(80, ct);
             await _sendQuiet(new IpcRequest
             {
                 Command = "set-group-volume",
                 GroupId = Id,
                 Volume = volume
             });
-            // Clear the debounce token so UpdateFrom() knows the daemon now
-            // has the latest value and can resume syncing volume from it.
-            if (_volumeDebounce?.Token == ct)
-                _volumeDebounce = null;
         }
-        catch (TaskCanceledException) { }
+        catch (Exception)
+        {
+            // Best-effort; swallow send failures (socket closed, etc.)
+        }
+        finally
+        {
+            // Clear the flag so UpdateFrom() resumes syncing volume
+            // from the daemon.
+            _volumeDebounceActive = false;
+        }
     }
 
     public bool Muted
@@ -1060,7 +1069,7 @@ public class GroupColumnViewModel : ReactiveObject
         // Skip volume sync while a debounce is pending — the user's slider
         // position is authoritative until the debounced send completes and
         // the daemon acknowledges the new value.
-        var debounceActive = _volumeDebounce is not null && !_volumeDebounce.IsCancellationRequested;
+        var debounceActive = _volumeDebounceActive;
         if (!debounceActive && _volume != source._volume)
         {
             _volume = source._volume;

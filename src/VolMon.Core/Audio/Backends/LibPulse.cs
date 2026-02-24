@@ -226,6 +226,24 @@ internal static partial class LibPulse
         [FieldOffset(368)] public IntPtr format;
     }
 
+    /// <summary>
+    /// pa_server_info — returned by <see cref="pa_context_get_server_info"/>.
+    /// We only need <c>default_sink_name</c> and <c>default_source_name</c>.
+    /// Layout verified on x86_64 Linux (PulseAudio 16.1 / PipeWire 0.3).
+    /// </summary>
+    [StructLayout(LayoutKind.Explicit, Size = 200)]
+    public struct pa_server_info
+    {
+        [FieldOffset( 0)] public IntPtr user_name;           // const char*
+        [FieldOffset( 8)] public IntPtr host_name;           // const char*
+        [FieldOffset(16)] public IntPtr server_version;      // const char*
+        [FieldOffset(24)] public IntPtr server_name;         // const char*
+        [FieldOffset(32)] public pa_sample_spec sample_spec;
+        [FieldOffset(48)] public IntPtr default_sink_name;   // const char*
+        [FieldOffset(56)] public IntPtr default_source_name; // const char*
+        [FieldOffset(64)] public uint   cookie;
+    }
+
     // ── Callback Delegates ───────────────────────────────────────────
     // IMPORTANT: instances must be stored to prevent GC collection.
 
@@ -238,6 +256,9 @@ internal static partial class LibPulse
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void pa_context_subscribe_cb_t(
         IntPtr context, pa_subscription_event_type_t type, uint idx, IntPtr userdata);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void pa_server_info_cb_t(IntPtr context, IntPtr info, IntPtr userdata);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void pa_sink_info_cb_t(
@@ -333,6 +354,13 @@ internal static partial class LibPulse
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr pa_context_subscribe(IntPtr c,
         pa_subscription_mask_t mask, pa_context_success_cb_t? cb, IntPtr userdata);
+
+    // ── Introspection: Server ────────────────────────────────────────
+
+    /// <summary>Queries server info (including default sink/source names).</summary>
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr pa_context_get_server_info(IntPtr c,
+        pa_server_info_cb_t cb, IntPtr userdata);
 
     // ── Introspection: Sinks ─────────────────────────────────────────
 

@@ -42,6 +42,13 @@ public interface IAudioBackend : IDisposable
     /// <summary>Raised when a device is added, removed, or changed.</summary>
     event EventHandler<AudioDeviceEventArgs> DeviceChanged;
 
+    /// <summary>
+    /// Raised when the system default audio sink changes (e.g. user switches
+    /// from speakers to headphones or Bluetooth). The event argument contains
+    /// the new default sink name.
+    /// </summary>
+    event EventHandler<DefaultSinkChangedEventArgs> DefaultSinkChanged;
+
     // ── Monitoring ───────────────────────────────────────────────────
 
     /// <summary>Starts background monitoring for stream and device events.</summary>
@@ -78,19 +85,32 @@ public interface IAudioBackend : IDisposable
         CancellationToken ct = default);
 
     /// <summary>
-    /// Sets the volume (0–100) on a virtual sink by its node name, using the native
-    /// PipeWire API (<c>pw_node_set_param</c>) so that the DSP-level volume is actually
-    /// applied. The PA-compat <c>pa_context_set_sink_volume_by_name</c> path does not
-    /// write to the PipeWire node's volume prop and has no audible effect.
+    /// Sets the volume (0–100) on a virtual sink by its node name.
     /// No-op on backends that do not support virtual sinks.
     /// </summary>
     Task SetVirtualSinkVolumeAsync(string sinkName, int volume, CancellationToken ct = default);
 
     /// <summary>
-    /// Sets the mute state on a virtual sink by its node name via the native PipeWire API.
+    /// Sets the mute state on a virtual sink by its node name.
     /// No-op on backends that do not support virtual sinks.
     /// </summary>
     Task SetVirtualSinkMuteAsync(string sinkName, bool muted, CancellationToken ct = default);
+
+    /// <summary>
+    /// Re-links a virtual sink's monitor output ports to a different hardware sink.
+    /// Called when the system default sink changes so that audio from virtual sinks
+    /// flows to the new output device. <paramref name="targetSinkName"/> is the PA
+    /// sink name of the new target (e.g. <c>"alsa_output.pci-0000_00_1f.3.analog-stereo"</c>).
+    /// No-op on backends that do not support virtual sinks.
+    /// </summary>
+    Task RelinkVirtualSinkAsync(string virtualSinkName, string targetSinkName,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns the name of the current default audio output sink, or <c>null</c>
+    /// if it cannot be determined.
+    /// </summary>
+    Task<string?> GetDefaultSinkNameAsync(CancellationToken ct = default);
 }
 
 public sealed class AudioStreamEventArgs : EventArgs
@@ -110,4 +130,10 @@ public enum AudioDeviceEventType
     Added,
     Removed,
     Changed
+}
+
+public sealed class DefaultSinkChangedEventArgs : EventArgs
+{
+    /// <summary>The PA sink name of the new default output sink.</summary>
+    public required string SinkName { get; init; }
 }

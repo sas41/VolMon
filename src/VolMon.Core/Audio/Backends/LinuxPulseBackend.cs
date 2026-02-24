@@ -54,6 +54,13 @@ public sealed class LinuxPulseBackend : IAudioBackend
     public event EventHandler<AudioStreamEventArgs>? StreamRemoved;
     public event EventHandler<AudioStreamEventArgs>? StreamChanged;
     public event EventHandler<AudioDeviceEventArgs>? DeviceChanged;
+    public event EventHandler<DefaultSinkChangedEventArgs>? DefaultSinkChanged;
+
+    /// <summary>
+    /// Last known default sink name, used to detect changes when a Server
+    /// subscription event fires.
+    /// </summary>
+    private string? _lastDefaultSinkName;
 
     // ── Connection lifecycle ─────────────────────────────────────────
 
@@ -540,9 +547,13 @@ public sealed class LinuxPulseBackend : IAudioBackend
     // ── Monitoring ───────────────────────────────────────────────────
 
     /// <inheritdoc/>
-    public Task StartMonitoringAsync(CancellationToken ct = default)
+    public async Task StartMonitoringAsync(CancellationToken ct = default)
     {
         EnsureConnected();
+
+        // Seed the last known default sink name so that the first Server
+        // subscription event can detect an actual change.
+        _lastDefaultSinkName = await GetDefaultSinkNameAsync(ct);
 
         _subscribeCallback = OnSubscriptionEvent;
 
@@ -554,7 +565,8 @@ public sealed class LinuxPulseBackend : IAudioBackend
             var mask = pa_subscription_mask_t.Sink
                      | pa_subscription_mask_t.Source
                      | pa_subscription_mask_t.SinkInput
-                     | pa_subscription_mask_t.SourceOutput;
+                     | pa_subscription_mask_t.SourceOutput
+                     | pa_subscription_mask_t.Server;
 
             var op = pa_context_subscribe(_context, mask, null, IntPtr.Zero);
             if (op != IntPtr.Zero) pa_operation_unref(op);
@@ -563,8 +575,6 @@ public sealed class LinuxPulseBackend : IAudioBackend
         {
             PaUnlock();
         }
-
-        return Task.CompletedTask;
     }
 
     /// <inheritdoc/>
@@ -637,6 +647,69 @@ public sealed class LinuxPulseBackend : IAudioBackend
                 ThreadPool.QueueUserWorkItem(_ => DeviceChanged?.Invoke(this, args));
                 break;
             }
+
+            case pa_subscription_event_type_t.Server:
+            {
+                // Server event fires when the default sink/source changes.
+                // Query the new default sink name and fire DefaultSinkChanged
+                // if it actually changed.
+                ThreadPool.QueueUserWorkItem(_ => CheckDefaultSinkChanged());
+                break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Queries the current default sink name from the PA server and fires
+    /// <see cref="DefaultSinkChanged"/> if it differs from the last known value.
+    /// Called on the thread pool when a Server subscription event fires.
+    /// </summary>
+    private void CheckDefaultSinkChanged()
+    {
+        try
+        {
+            string? newDefault = null;
+            var done = false;
+
+            pa_server_info_cb_t cb = (_, infoPtr, _) =>
+            {
+                if (infoPtr != IntPtr.Zero)
+                {
+                    var info = Marshal.PtrToStructure<pa_server_info>(infoPtr);
+                    newDefault = PtrToStringUtf8(info.default_sink_name);
+                }
+                done = true;
+                Monitor.PulseAll(_paLock);
+            };
+
+            PaLock();
+            try
+            {
+                var op = pa_context_get_server_info(_context, cb, IntPtr.Zero);
+                if (op == IntPtr.Zero) return;
+
+                while (!done)
+                    PaWait();
+
+                pa_operation_unref(op);
+            }
+            finally
+            {
+                PaUnlock();
+            }
+
+            GC.KeepAlive(cb);
+
+            if (newDefault is not null && newDefault != _lastDefaultSinkName)
+            {
+                _lastDefaultSinkName = newDefault;
+                DefaultSinkChanged?.Invoke(this,
+                    new DefaultSinkChangedEventArgs { SinkName = newDefault });
+            }
+        }
+        catch (Exception)
+        {
+            // Non-fatal — best effort detection of default sink changes.
         }
     }
 
@@ -739,20 +812,24 @@ public sealed class LinuxPulseBackend : IAudioBackend
     /// The returned <c>uint</c> is an opaque handle used as the argument to
     /// <see cref="DestroyVirtualSinkAsync"/>. It has no meaning outside this class.
     /// </remarks>
-    public Task<uint?> CreateVirtualSinkAsync(string sinkName, string description,
+    public async Task<uint?> CreateVirtualSinkAsync(string sinkName, string description,
         CancellationToken ct = default)
     {
+        // Query the current default sink so the virtual sink links to the right
+        // hardware output from the start, instead of guessing from the registry.
+        var defaultSink = await GetDefaultSinkNameAsync(ct);
+
         PipeWireVirtualSink sink;
         try
         {
-            sink = PipeWireVirtualSink.Create(sinkName, description);
+            sink = PipeWireVirtualSink.Create(sinkName, description, defaultSink);
         }
         catch (Exception ex)
         {
             // Log and return null to signal failure to the caller (StreamWatcher).
             System.Diagnostics.Debug.WriteLine(
                 $"[VolMon] PipeWireVirtualSink.Create({sinkName}) failed: {ex.Message}");
-            return Task.FromResult<uint?>(null);
+            return null;
         }
 
         // Use the object's identity hash as a stable uint handle.
@@ -761,7 +838,7 @@ public sealed class LinuxPulseBackend : IAudioBackend
         _virtualSinks[sinkName] = sink;
         _virtualSinkByHandle[handle] = sink;
 
-        return Task.FromResult<uint?>(handle);
+        return handle;
     }
 
     /// <inheritdoc/>
@@ -858,6 +935,56 @@ public sealed class LinuxPulseBackend : IAudioBackend
         {
             PaUnlock();
         }
+
+        return Task.CompletedTask;
+    }
+
+    // ── Default sink / re-linking ────────────────────────────────────
+
+    /// <inheritdoc/>
+    public Task<string?> GetDefaultSinkNameAsync(CancellationToken ct = default)
+    {
+        EnsureConnected();
+        string? result = null;
+        var done = false;
+
+        pa_server_info_cb_t cb = (_, infoPtr, _) =>
+        {
+            if (infoPtr != IntPtr.Zero)
+            {
+                var info = Marshal.PtrToStructure<pa_server_info>(infoPtr);
+                result = PtrToStringUtf8(info.default_sink_name);
+            }
+            done = true;
+            Monitor.PulseAll(_paLock);
+        };
+
+        PaLock();
+        try
+        {
+            var op = pa_context_get_server_info(_context, cb, IntPtr.Zero);
+            if (op == IntPtr.Zero) return Task.FromResult<string?>(null);
+
+            while (!done)
+                PaWait();
+
+            pa_operation_unref(op);
+        }
+        finally
+        {
+            PaUnlock();
+        }
+
+        GC.KeepAlive(cb);
+        return Task.FromResult(result);
+    }
+
+    /// <inheritdoc/>
+    public Task RelinkVirtualSinkAsync(string virtualSinkName, string targetSinkName,
+        CancellationToken ct = default)
+    {
+        if (_virtualSinks.TryGetValue(virtualSinkName, out var sink))
+            sink.RelinkToSink(targetSinkName);
 
         return Task.CompletedTask;
     }

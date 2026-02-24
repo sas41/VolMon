@@ -43,6 +43,9 @@ namespace VolMon.Core.Audio.Backends;
     public event EventHandler<AudioStreamEventArgs>? StreamChanged;
 #pragma warning restore CS0067
     public event EventHandler<AudioDeviceEventArgs>? DeviceChanged;
+#pragma warning disable CS0067 // DefaultSinkChanged not raised on Windows — virtual sinks are not supported
+    public event EventHandler<DefaultSinkChangedEventArgs>? DefaultSinkChanged;
+#pragma warning restore CS0067
 
     // ── Streams ──────────────────────────────────────────────────────
 
@@ -290,6 +293,8 @@ namespace VolMon.Core.Audio.Backends;
     public Task MoveStreamToSinkAsync(string streamId, string sinkName, CancellationToken ct = default) => Task.CompletedTask;
     public Task SetVirtualSinkVolumeAsync(string sinkName, int volume, CancellationToken ct = default) => Task.CompletedTask;
     public Task SetVirtualSinkMuteAsync(string sinkName, bool muted, CancellationToken ct = default) => Task.CompletedTask;
+    public Task RelinkVirtualSinkAsync(string virtualSinkName, string targetSinkName, CancellationToken ct = default) => Task.CompletedTask;
+    public Task<string?> GetDefaultSinkNameAsync(CancellationToken ct = default) => Task.FromResult<string?>(null);
 
     /// <summary>
     /// Finds a session by stream ID (PID string) across already-tracked devices.

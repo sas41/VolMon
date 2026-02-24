@@ -77,6 +77,7 @@ internal sealed class PipeWireVirtualSink : IDisposable
     // the lock or waits via PwWait which re-acquires it).
     private readonly List<NodeInfo> _nodes = new();
     private readonly List<PortInfo> _ports = new();
+    private readonly List<LinkInfo> _links = new();
 
     // ── Pinned GC handles for native callback structs ────────────────
     // These must stay alive for as long as the listeners are registered.
@@ -96,6 +97,9 @@ internal sealed class PipeWireVirtualSink : IDisposable
 
     private volatile bool _disposed;
 
+    /// <summary>PipeWire registry ID of this virtual sink node.</summary>
+    private uint _volNodeId;
+
     /// <summary>
     /// The <c>node.name</c> of the created sink.
     /// Pass this to <c>pa_context_move_sink_input_by_name</c> to route streams here,
@@ -107,6 +111,7 @@ internal sealed class PipeWireVirtualSink : IDisposable
 
     private record struct NodeInfo(uint Id, string Name, string MediaClass);
     private record struct PortInfo(uint Id, uint NodeId, string PortName, string Direction, bool IsMonitor);
+    private record struct LinkInfo(uint Id, uint OutputNode, uint InputNode);
 
     // ── Factory ──────────────────────────────────────────────────────
 
@@ -114,20 +119,26 @@ internal sealed class PipeWireVirtualSink : IDisposable
 
     /// <summary>
     /// Creates a virtual sink node in PipeWire and starts the background event loop.
-    /// Blocks until the sink node is created and linked to the default hardware output.
+    /// Blocks until the sink node is created and linked to the target hardware output.
     /// </summary>
     /// <param name="nodeName">Stable unique name, e.g. <c>volmon_compat_abc123</c>.</param>
     /// <param name="description">Human-readable description (not shown in GNOME device picker).</param>
-    public static PipeWireVirtualSink Create(string nodeName, string description)
+    /// <param name="targetSinkName">
+    /// PA sink name of the hardware output to link to (e.g. from
+    /// <c>pa_context_get_server_info</c>). If <c>null</c>, the first available
+    /// non-VolMon <c>Audio/Sink</c> in the PipeWire registry is used.
+    /// </param>
+    public static PipeWireVirtualSink Create(string nodeName, string description,
+        string? targetSinkName = null)
     {
         var sink = new PipeWireVirtualSink(nodeName);
-        sink.Initialize(description);
+        sink.Initialize(description, targetSinkName);
         return sink;
     }
 
     // ── Initialization ───────────────────────────────────────────────
 
-    private void Initialize(string description)
+    private void Initialize(string description, string? targetSinkName = null)
     {
         pw_init(IntPtr.Zero, IntPtr.Zero);
 
@@ -222,6 +233,8 @@ internal sealed class PipeWireVirtualSink : IDisposable
             if (volNodeId == uint.MaxValue)
                 throw new InvalidOperationException($"Node '{NodeName}' did not appear in registry after creation");
 
+            _volNodeId = volNodeId;
+
             // 11. Poll for ports to be registered (async via WirePlumber)
             // Ports are not created synchronously — they arrive later as
             // registry 'global' events.  Poll by iterating with short timeouts.
@@ -232,7 +245,7 @@ internal sealed class PipeWireVirtualSink : IDisposable
             uint monitorFr = FindPort(volNodeId, direction: "out", nameContains: "FR", monitorOnly: true);
 
             // 13. Find hardware sink and its playback input ports ──────
-            uint hwNodeId = FindHardwareSinkId();
+            uint hwNodeId = FindSinkIdByName(targetSinkName);
             if (hwNodeId == uint.MaxValue)
             {
                 // No hardware sink found — sink is created but audio won't flow.
@@ -338,12 +351,24 @@ internal sealed class PipeWireVirtualSink : IDisposable
                 _ports.Add(new PortInfo(id, nid, portName, dir, isMonitor));
             }
         }
+        else if (type == PW_TYPE_INTERFACE_Link)
+        {
+            string? outNode = SpaDictLookup(propsPtr, "link.output.node");
+            string? inNode  = SpaDictLookup(propsPtr, "link.input.node");
+            if (outNode != null && inNode != null
+                && uint.TryParse(outNode, out uint outNid)
+                && uint.TryParse(inNode, out uint inNid))
+            {
+                _links.Add(new LinkInfo(id, outNid, inNid));
+            }
+        }
     }
 
     private void OnRegistryGlobalRemove(IntPtr data, uint id)
     {
         _nodes.RemoveAll(n => n.Id == id);
         _ports.RemoveAll(p => p.Id == id);
+        _links.RemoveAll(l => l.Id == id);
     }
 
     // ── Helpers (must be called under _pwLock) ───────────────────────
@@ -387,11 +412,24 @@ internal sealed class PipeWireVirtualSink : IDisposable
         return node.Id != 0 ? node.Id : uint.MaxValue;
     }
 
-    private uint FindHardwareSinkId()
+    /// <summary>
+    /// Finds the PipeWire node ID of a sink by its exact PA sink name.
+    /// Falls back to the first ALSA sink if <paramref name="sinkName"/> is <c>null</c>.
+    /// </summary>
+    private uint FindSinkIdByName(string? sinkName)
     {
+        if (sinkName is not null)
+        {
+            var exact = _nodes.FirstOrDefault(n =>
+                n.MediaClass == "Audio/Sink" &&
+                n.Name.Equals(sinkName, StringComparison.Ordinal));
+            if (exact.Id != 0) return exact.Id;
+        }
+
+        // Fallback: first Audio/Sink that looks like real hardware.
         var hw = _nodes.FirstOrDefault(n =>
             n.MediaClass == "Audio/Sink" &&
-            n.Name.Contains("alsa", StringComparison.OrdinalIgnoreCase));
+            !n.Name.StartsWith("volmon_compat_", StringComparison.Ordinal));
         return hw.Id != 0 ? hw.Id : uint.MaxValue;
     }
 
@@ -420,6 +458,65 @@ internal sealed class PipeWireVirtualSink : IDisposable
             PW_VERSION_LINK, props, UIntPtr.Zero);
 
         pw_properties_free(props);
+    }
+
+    // ── Re-linking ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Destroys existing links from this virtual sink's monitor output ports
+    /// to the old hardware sink, then creates new links to <paramref name="targetSinkName"/>.
+    /// Called when the system default audio output changes.
+    /// </summary>
+    /// <param name="targetSinkName">
+    /// The PA/PipeWire sink name of the new target (e.g.
+    /// <c>"alsa_output.pci-0000_00_1f.3.analog-stereo"</c>).
+    /// </param>
+    public void RelinkToSink(string targetSinkName)
+    {
+        if (_disposed || _volNodeId == 0) return;
+
+        lock (_pwLock)
+        {
+            if (_core == IntPtr.Zero || _registry == IntPtr.Zero) return;
+
+            // 1. Refresh registry state so _links/_nodes/_ports are current.
+            PwSync();
+
+            // 2. Destroy all links that originate from our virtual sink node.
+            var outgoingLinks = _links
+                .Where(l => l.OutputNode == _volNodeId)
+                .ToList();
+
+            foreach (var link in outgoingLinks)
+                pw_registry_destroy(_registry, link.Id);
+
+            if (outgoingLinks.Count > 0)
+                PwSync();  // let destroy requests propagate
+
+            // 3. Find the new target sink's node ID and input ports.
+            uint hwNodeId = FindSinkIdByName(targetSinkName);
+            if (hwNodeId == uint.MaxValue) return;
+
+            uint hwFl = FindPort(hwNodeId, direction: "in", nameContains: "FL", monitorOnly: false);
+            uint hwFr = FindPort(hwNodeId, direction: "in", nameContains: "FR", monitorOnly: false);
+
+            // 4. Find our monitor output ports.
+            uint monitorFl = FindPort(_volNodeId, direction: "out", nameContains: "FL", monitorOnly: true);
+            uint monitorFr = FindPort(_volNodeId, direction: "out", nameContains: "FR", monitorOnly: true);
+
+            // 5. Create new links.
+            if (monitorFl != uint.MaxValue && hwFl != uint.MaxValue)
+                CreateLink(_volNodeId, monitorFl, hwNodeId, hwFl);
+
+            if (monitorFr != uint.MaxValue && hwFr != uint.MaxValue)
+                CreateLink(_volNodeId, monitorFr, hwNodeId, hwFr);
+
+            if ((monitorFl != uint.MaxValue && hwFl != uint.MaxValue) ||
+                (monitorFr != uint.MaxValue && hwFr != uint.MaxValue))
+            {
+                PwSync();
+            }
+        }
     }
 
     // ── Managed loop thread ──────────────────────────────────────────

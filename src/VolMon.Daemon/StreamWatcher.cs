@@ -74,6 +74,7 @@ public sealed class StreamWatcher : IDisposable
         _backend.StreamRemoved += OnStreamRemoved;
         _backend.StreamChanged += OnStreamChanged;
         _backend.DeviceChanged += OnDeviceChanged;
+        _backend.DefaultSinkChanged += OnDefaultSinkChanged;
     }
 
     /// <summary>
@@ -392,6 +393,34 @@ public sealed class StreamWatcher : IDisposable
         }
     }
 
+    private async void OnDefaultSinkChanged(object? sender, DefaultSinkChangedEventArgs e)
+    {
+        try
+        {
+            _logger.LogInformation(
+                "Default sink changed to '{SinkName}', re-linking {Count} virtual sink(s)",
+                e.SinkName, _virtualSinks.Count);
+
+            foreach (var (groupId, vsink) in _virtualSinks.ToArray())
+            {
+                try
+                {
+                    await _backend.RelinkVirtualSinkAsync(vsink.SinkName, e.SinkName);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Failed to re-link virtual sink '{SinkName}' to new default '{Target}'",
+                        vsink.SinkName, e.SinkName);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error handling default sink change");
+        }
+    }
+
     // ── Assignment logic ─────────────────────────────────────────────
 
     /// <summary>
@@ -685,6 +714,7 @@ public sealed class StreamWatcher : IDisposable
         _backend.StreamRemoved -= OnStreamRemoved;
         _backend.StreamChanged -= OnStreamChanged;
         _backend.DeviceChanged -= OnDeviceChanged;
+        _backend.DefaultSinkChanged -= OnDefaultSinkChanged;
 
         // Best-effort teardown of virtual sinks on shutdown (fire-and-forget).
         foreach (var (groupId, vsink) in _virtualSinks.ToArray())

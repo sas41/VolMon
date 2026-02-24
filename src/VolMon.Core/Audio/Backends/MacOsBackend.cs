@@ -14,6 +14,7 @@ public sealed class MacOsBackend : IAudioBackend
     public event EventHandler<AudioStreamEventArgs>? StreamRemoved;
     public event EventHandler<AudioStreamEventArgs>? StreamChanged;
     public event EventHandler<AudioDeviceEventArgs>? DeviceChanged;
+    public event EventHandler<DefaultSinkChangedEventArgs>? DefaultSinkChanged;
 
     public Task<IReadOnlyList<AudioStream>> GetStreamsAsync(CancellationToken ct = default) =>
         Task.FromResult((IReadOnlyList<AudioStream>)new List<AudioStream>());
@@ -42,4 +43,6 @@ public sealed class MacOsBackend : IAudioBackend
     public Task MoveStreamToSinkAsync(string streamId, string sinkName, CancellationToken ct = default) => Task.CompletedTask;
     public Task SetVirtualSinkVolumeAsync(string sinkName, int volume, CancellationToken ct = default) => Task.CompletedTask;
     public Task SetVirtualSinkMuteAsync(string sinkName, bool muted, CancellationToken ct = default) => Task.CompletedTask;
+    public Task RelinkVirtualSinkAsync(string virtualSinkName, string targetSinkName, CancellationToken ct = default) => Task.CompletedTask;
+    public Task<string?> GetDefaultSinkNameAsync(CancellationToken ct = default) => Task.FromResult<string?>(null);
 }

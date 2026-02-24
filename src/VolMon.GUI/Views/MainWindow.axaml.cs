@@ -420,6 +420,9 @@ public partial class MainWindow : Window
         binding.IsListening = true;
         binding.KeyDisplay = "Press a key...";
         _listeningBinding = binding;
+
+        // Suppress global hotkeys while rebinding
+        _viewModel?.NotifyShortcutListening(true);
     }
 
     private async void OnShortcutClearClick(ShortcutBindingViewModel binding)
@@ -430,6 +433,9 @@ public partial class MainWindow : Window
             _listeningBinding.IsListening = false;
             _listeningBinding.KeyDisplay = ShortcutBindingViewModel.FormatKey(_listeningBinding.KeyCode);
             _listeningBinding = null;
+
+            // Re-enable global hotkeys
+            _viewModel?.NotifyShortcutListening(false);
         }
 
         if (_viewModel is not null)
@@ -450,6 +456,9 @@ public partial class MainWindow : Window
                 _listeningBinding.IsListening = false;
                 _listeningBinding = null;
 
+                // Re-enable global hotkeys
+                _viewModel?.NotifyShortcutListening(false);
+
                 if (_viewModel is not null)
                     await _viewModel.SaveShortcutsAsync();
             }
@@ -459,6 +468,93 @@ public partial class MainWindow : Window
         }
 
         base.OnKeyDown(e);
+    }
+
+    protected override async void OnPointerPressed(PointerPressedEventArgs e)
+    {
+        if (_listeningBinding is not null)
+        {
+            var point = e.GetCurrentPoint(this);
+            var mouseToken = MapPointerButtonToToken(point.Properties);
+
+            if (mouseToken is not null)
+            {
+                // Build combo string with keyboard modifiers: e.g. "Ctrl+Mouse4"
+                var combo = BuildComboString(e.KeyModifiers, mouseToken);
+                _listeningBinding.KeyCode = combo;
+                _listeningBinding.IsListening = false;
+                _listeningBinding = null;
+
+                // Re-enable global hotkeys
+                _viewModel?.NotifyShortcutListening(false);
+
+                if (_viewModel is not null)
+                    await _viewModel.SaveShortcutsAsync();
+
+                e.Handled = true;
+                return;
+            }
+        }
+
+        base.OnPointerPressed(e);
+    }
+
+    protected override async void OnPointerWheelChanged(PointerWheelEventArgs e)
+    {
+        if (_listeningBinding is not null)
+        {
+            var token = MapWheelDeltaToToken(e.Delta);
+            if (token is not null)
+            {
+                var combo = BuildComboString(e.KeyModifiers, token);
+                _listeningBinding.KeyCode = combo;
+                _listeningBinding.IsListening = false;
+                _listeningBinding = null;
+
+                _viewModel?.NotifyShortcutListening(false);
+
+                if (_viewModel is not null)
+                    await _viewModel.SaveShortcutsAsync();
+
+                e.Handled = true;
+                return;
+            }
+        }
+
+        base.OnPointerWheelChanged(e);
+    }
+
+    /// <summary>
+    /// Maps an Avalonia wheel delta vector to a "WheelXxx" token.
+    /// Avalonia Delta: positive Y = up, negative Y = down; positive X = right, negative X = left.
+    /// </summary>
+    private static string? MapWheelDeltaToToken(Vector delta)
+    {
+        // Prefer the axis with the larger absolute movement to handle diagonal scrolling.
+        if (Math.Abs(delta.Y) >= Math.Abs(delta.X))
+        {
+            if (delta.Y > 0) return "WheelUp";
+            if (delta.Y < 0) return "WheelDown";
+        }
+        else
+        {
+            if (delta.X > 0) return "WheelRight";
+            if (delta.X < 0) return "WheelLeft";
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Maps an Avalonia pointer button to the "MouseN" token used in combo strings.
+    /// </summary>
+    private static string? MapPointerButtonToToken(PointerPointProperties props)
+    {
+        if (props.IsXButton1Pressed) return "Mouse4";
+        if (props.IsXButton2Pressed) return "Mouse5";
+        if (props.IsMiddleButtonPressed) return "Mouse3";
+        if (props.IsLeftButtonPressed) return "Mouse1";
+        if (props.IsRightButtonPressed) return "Mouse2";
+        return null;
     }
 
     /// <summary>
@@ -511,12 +607,19 @@ public partial class MainWindow : Window
         Key.D4 => "4", Key.D5 => "5", Key.D6 => "6", Key.D7 => "7",
         Key.D8 => "8", Key.D9 => "9",
 
-        // Numpad
+        // Numpad digits
         Key.NumPad0 => "NumPad0", Key.NumPad1 => "NumPad1",
         Key.NumPad2 => "NumPad2", Key.NumPad3 => "NumPad3",
         Key.NumPad4 => "NumPad4", Key.NumPad5 => "NumPad5",
         Key.NumPad6 => "NumPad6", Key.NumPad7 => "NumPad7",
         Key.NumPad8 => "NumPad8", Key.NumPad9 => "NumPad9",
+
+        // Numpad operators
+        Key.Multiply => "NumPadMultiply",
+        Key.Divide   => "NumPadDivide",
+        Key.Subtract => "NumPadSubtract",
+        Key.Add      => "NumPadAdd",
+        Key.Decimal  => "NumPadDecimal",
 
         // Navigation
         Key.Up => "Up", Key.Down => "Down", Key.Left => "Left", Key.Right => "Right",
@@ -533,7 +636,7 @@ public partial class MainWindow : Window
         // Punctuation/symbols
         Key.OemMinus => "Minus", Key.OemPlus => "Equals",
         Key.OemOpenBrackets => "OpenBracket", Key.OemCloseBrackets => "CloseBracket",
-        Key.OemBackslash => "BackSlash", Key.OemSemicolon => "Semicolon",
+        Key.OemBackslash or Key.OemPipe => "Backslash", Key.OemSemicolon => "Semicolon",
         Key.OemQuotes => "Quote", Key.OemComma => "Comma",
         Key.OemPeriod => "Period", Key.OemQuestion => "Slash",
         Key.OemTilde => "BackQuote",

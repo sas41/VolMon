@@ -136,6 +136,12 @@ public class App : Application
                 _hotkeyService.Configure(newConfig);
             };
 
+            // Suppress / restore hotkeys while the user is rebinding a shortcut
+            vm.ShortcutListeningChanged += isListening =>
+            {
+                _hotkeyService.IsListening = isListening;
+            };
+
             try { await _hotkeyService.StartAsync(); }
             catch { /* hook may fail in some environments (e.g. Wayland without permissions) */ }
         }

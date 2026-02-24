@@ -649,6 +649,19 @@ public class MainViewModel : ReactiveObject
     public event Action<ShortcutConfig>? ShortcutsChanged;
 
     /// <summary>
+    /// Raised when the user starts or stops rebinding a shortcut.
+    /// True = rebinding in progress (hotkeys should be suppressed).
+    /// False = rebinding finished or cancelled.
+    /// </summary>
+    public event Action<bool>? ShortcutListeningChanged;
+
+    /// <summary>
+    /// Called by the view to notify that shortcut-rebind listening has started or stopped.
+    /// </summary>
+    public void NotifyShortcutListening(bool isListening) =>
+        ShortcutListeningChanged?.Invoke(isListening);
+
+    /// <summary>
     /// Removes the key binding for a shortcut (sets it to empty).
     /// </summary>
     public async Task ClearShortcutAsync(ShortcutBindingViewModel binding)
@@ -1306,8 +1319,8 @@ public class ShortcutBindingViewModel : ReactiveObject
 
     /// <summary>
     /// Formats a key combo string for display.
-    /// Input: "Ctrl+Shift+F1" or "F13" or "Ctrl+A"
-    /// Output: "Ctrl + Shift + F1" or "F13" or "Ctrl + A"
+    /// Input: "Ctrl+Shift+F1" or "F13" or "Ctrl+A" or "Mouse4"
+    /// Output: "Ctrl + Shift + F1" or "F13" or "Ctrl + A" or "Mouse 4"
     /// Strips "Vc" prefix from the key part if present.
     /// </summary>
     public static string FormatKey(string keyCode)
@@ -1318,10 +1331,23 @@ public class ShortcutBindingViewModel : ReactiveObject
         if (parts.Length == 0) return "(None)";
 
         // Format each part: modifiers stay as-is, key part strips "Vc" prefix
+        // and translates mouse button tokens to friendly names.
         for (int i = 0; i < parts.Length; i++)
         {
-            if (parts[i].StartsWith("Vc", StringComparison.OrdinalIgnoreCase))
-                parts[i] = parts[i][2..];
+            parts[i] = parts[i].ToLowerInvariant() switch
+            {
+                "mouse1"     => "Mouse Left",
+                "mouse2"     => "Mouse Right",
+                "mouse3"     => "Mouse Middle",
+                "mouse4"     => "Mouse 4",
+                "mouse5"     => "Mouse 5",
+                "wheelup"    => "Wheel Up",
+                "wheeldown"  => "Wheel Down",
+                "wheelleft"  => "Wheel Left",
+                "wheelright" => "Wheel Right",
+                _ when parts[i].StartsWith("Vc", StringComparison.OrdinalIgnoreCase) => parts[i][2..],
+                _ => parts[i],
+            };
         }
 
         return string.Join(" + ", parts);

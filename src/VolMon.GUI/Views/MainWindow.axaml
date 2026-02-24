@@ -85,9 +85,10 @@
                                 <Button Grid.Column="2"
                                         Classes="shortcutClear"
                                         Tag="{Binding}"
-                                        Content="&#x2715;"
-                                        FontSize="10" Padding="4,2"
-                                        Background="Transparent" Foreground="#888"
+                                        Content="Clear"
+                                        FontSize="11" Padding="6,3"
+                                        Background="#553333" Foreground="#CC8888"
+                                        CornerRadius="3"
                                         Margin="4,0,0,0"
                                         ToolTip.Tip="Remove binding" />
                             </Grid>

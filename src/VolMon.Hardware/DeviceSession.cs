@@ -54,6 +54,12 @@ internal sealed class DeviceSession : IAsyncDisposable
     private readonly object _debounceLock = new();
     private readonly DateTime[] _lastCommandTime;
 
+    // Per-dial volume we last sent to the daemon. Used to suppress stale
+    // state-changed echoes: if the daemon reports a volume that doesn't match
+    // what we last sent, it's a stale echo from an older command.
+    // null = no pending command, accept any daemon volume.
+    private readonly int?[] _lastSentVolumes;
+
     public string DeviceId => _controller.DeviceId;
     public string DeviceName => _controller.DeviceName;
     public DeviceSessionState State { get; private set; } = DeviceSessionState.Starting;
@@ -76,6 +82,7 @@ internal sealed class DeviceSession : IAsyncDisposable
         _pendingDeltas = new int[dialCount];
         _debounceCts = new CancellationTokenSource?[dialCount];
         _lastCommandTime = new DateTime[dialCount];
+        _lastSentVolumes = new int?[dialCount];
     }
 
     /// <summary>
@@ -257,6 +264,7 @@ internal sealed class DeviceSession : IAsyncDisposable
         var newVol = Math.Clamp(currentVol + direction * effectiveStep, 0, 100);
 
         _dialVolumes[dialIndex] = newVol;
+        _lastSentVolumes[dialIndex] = newVol;
         _lastCommandTime[dialIndex] = DateTime.UtcNow;
 
         try
@@ -329,7 +337,21 @@ internal sealed class DeviceSession : IAsyncDisposable
                     continue;
 
                 _dialGroupIds[i] = g.Id;
-                _dialVolumes[i] = g.Volume;
+
+                // Volume echo suppression: if we have a pending sent volume, only
+                // accept the daemon's volume once it matches what we last sent.
+                // This prevents stale echoes from older commands snapping the
+                // display back to an outdated value during fast knob turning.
+                if (_lastSentVolumes[i] is { } sentVol)
+                {
+                    if (g.Volume == sentVol)
+                        _lastSentVolumes[i] = null; // daemon caught up, clear tracker
+                    // else: stale echo, keep our local optimistic volume
+                }
+
+                if (_lastSentVolumes[i] is null)
+                    _dialVolumes[i] = g.Volume;
+
                 _dialMuted[i] = g.Muted;
                 _dialGroupNames[i] = g.Name;
                 _dialGroupColors[i] = g.Color;
@@ -346,6 +368,7 @@ internal sealed class DeviceSession : IAsyncDisposable
                 _dialGroupColors[i] = null;
                 _dialActiveMembers[i] = null;
                 _dialInactiveMembers[i] = null;
+                _lastSentVolumes[i] = null;
             }
 
             UpdateDialColor(i);

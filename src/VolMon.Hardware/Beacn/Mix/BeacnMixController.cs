@@ -394,24 +394,31 @@ internal sealed class BeacnMixController : IHardwareController
 
                 if (!_device.IsOpen) continue;
 
-                // Render immediately if signalled and screen is on
-                if (_displayDirtySignal.IsSet && _displayState != DisplayState.Off)
+                // Always consume the dirty signal so that Wait() above
+                // actually blocks on the next iteration. Without this,
+                // a set signal + Off state causes a spin loop.
+                if (_displayDirtySignal.IsSet)
                 {
                     _displayDirtySignal.Reset();
-                    try
-                    {
-                        var result = TemplateRenderer.RenderWithDiff(_layout, _groupStates, ref _previousFramePixels);
 
-                        if (result is not null)
-                        {
-                            var r = result.Value;
-                            _device.SendImage(r.JpegData, r.X, r.Y);
-                        }
-                        // else: frame identical to previous, skip USB transfer
-                    }
-                    catch (Exception ex)
+                    // Only render when the screen is on
+                    if (_displayState != DisplayState.Off)
                     {
-                        _logger.LogWarning(ex, "Failed to update display");
+                        try
+                        {
+                            var result = TemplateRenderer.RenderWithDiff(_layout, _groupStates, ref _previousFramePixels);
+
+                            if (result is not null)
+                            {
+                                var r = result.Value;
+                                _device.SendImage(r.JpegData, r.X, r.Y);
+                            }
+                            // else: frame identical to previous, skip USB transfer
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Failed to update display");
+                        }
                     }
                 }
 

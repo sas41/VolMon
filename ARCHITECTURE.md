@@ -7,23 +7,25 @@ users organize audio streams (and hardware devices) into named groups, each with
 a shared volume and mute state. It does **not** create virtual audio devices —
 it controls volumes natively through the system audio server.
 
-The codebase is C# / .NET 10, split into four projects.
+The codebase is C# / .NET 10, split into seven projects.
 
 ```
- ┌──────────────┐   ┌──────────────┐
- │  VolMon.CLI  │   │  VolMon.GUI  │
- │ (console app)│   │(Avalonia app)│
- └──────┬───────┘   └──────┬───────┘
-        │  Named Pipes IPC │
-        └────────┬─────────┘
-          ┌──────┴───────┐
-          │ VolMon.Daemon│
-          │  (bg service)│
-          └──────┬───────┘
-          ┌──────┴───────┐
-          │ VolMon.Core  │
-          │  (library)   │
-          └──────────────┘
+ ┌──────────────┐   ┌──────────────┐    ┌──────────────────┐
+ │  VolMon.CLI  │   │  VolMon.GUI  │    │VolMon.HardwareGUI│
+ │ (console app)│   │(Avalonia app)│    │  (Avalonia app)  │
+ └──────┬───────┘   └──────┬───────┘    └────────┬─────────┘
+        │  Named Pipes IPC │                     │ File I/O
+        └────────┬─────────┘                     │ (hardware.json,
+          ┌──────┴───────┐                       │  per-device configs)
+          │ VolMon.Daemon│              ┌────────┴─────────┐
+          │  (bg service)│◂─ IPC ──────▸│ VolMon.Hardware  │
+          └──────┬───────┘              │(hardware daemon) │
+          ┌──────┴───────┐              └────────┬─────────┘
+          │ VolMon.Core  │              ┌────────┴─────────┐
+          │  (library)   │              │VolMon.Hardware   │
+          └──────────────┘              │      .Models     │
+                                        │ (shared config)  │
+                                        └──────────────────┘
 ```
 
 **VolMon.Core** is the shared library — models, IPC protocol, config
@@ -32,6 +34,14 @@ background service (systemd user unit on Linux) that monitors audio streams,
 enforces group volume rules, and hosts the IPC server. **VolMon.CLI** and
 **VolMon.GUI** are thin clients that communicate with the daemon over named
 pipes using a persistent duplex connection.
+
+**VolMon.Hardware** is a separate hardware daemon that communicates with USB
+controllers (e.g. Beacn Mix) and bridges physical input (dials, buttons) to
+daemon commands via the same IPC pipe. **VolMon.HardwareGUI** is an Avalonia
+configuration app for managing hardware devices. **VolMon.Hardware.Models** is
+a shared library containing config DTOs used by both Hardware and HardwareGUI
+(it exists to avoid a SkiaSharp version conflict — see
+[Hardware Models README](./src/VolMon.Hardware.Models/README.md)).
 
 ## Data Flow
 
@@ -84,20 +94,20 @@ CLI                                  Daemon
     ├──connect to named pipe───────────▸│
     ├──send IpcMessage(request)────────▸│
     │                                   ├── HandleIpcRequestAsync()
-    │◂─IpcMessage(response)────────────┤
+    │◂─IpcMessage(response)─────────────┤
     ├──dispose (close connection)       │
 
 GUI                                  Daemon
     │                                   │
     ├──connect to named pipe───────────▸│
     ├──send IpcMessage(request:status)─▸│
-    │◂─IpcMessage(response:full state)─┤
+    │◂─IpcMessage(response:full state)──┤
     │                                   │
-    │◂─IpcMessage(event:state-changed)─┤  ← push on any mutation
-    │◂─IpcMessage(event:state-changed)─┤  ← push on audio events
+    │◂─IpcMessage(event:state-changed)──┤  ← push on any mutation
+    │◂─IpcMessage(event:state-changed)──┤  ← push on audio events
     │                                   │
     ├──send IpcMessage(request)────────▸│  ← user actions (volume, etc.)
-    │◂─IpcMessage(response)────────────┤
+    │◂─IpcMessage(response)─────────────┤
     │  ... (connection stays open) ...  │
 ```
 
@@ -478,6 +488,88 @@ systemctl --user enable --now volmon
 The daemon runs in the user session (not as root), which gives it access to the
 user's PulseAudio/PipeWire session.
 
+
+## Hardware Daemon Architecture
+
+The hardware daemon (`VolMon.Hardware`) runs as a separate process alongside
+the main VolMon daemon. It manages physical USB controllers, bridging hardware
+input to daemon IPC commands.
+
+### Design Principles
+
+- **One daemon, all devices** — a single hardware daemon process manages every
+  connected USB controller.
+- **Crash isolation** — each device runs in its own `DeviceSession` (a
+  background `Task`). If one device crashes, the session is marked `Faulted`
+  and other devices continue running. Faulted sessions are automatically
+  restarted on the next scan cycle.
+- **No firmware uploads** — the daemon only reads input and sends display/LED
+  commands using the device's existing USB protocol. It never writes firmware.
+
+### Component Chain
+
+```
+USB Device  ◂──▸  IDeviceDriver  ──▸  IHardwareController  ──▸  DeviceSession  ──▸  DeviceManager
+                  (scan/detect)       (USB I/O, input,         (IPC bridge,       (lifecycle,
+                                       display, LEDs)           debounce,          config watch,
+                                                                echo suppress)     scan loop)
+```
+
+1. **IDeviceDriver** — scans USB bus for devices of a specific type, reads
+   serial numbers, creates controller instances. One driver per device family
+   (e.g. `BeacnMixDriver`).
+2. **IHardwareController** — manages a single physical device: opens USB,
+   polls for input, renders display, controls LEDs. Raises `DialRotated` and
+   `ButtonPressed` events.
+3. **DeviceSession** — wraps a controller with IPC bridge logic. Converts dial
+   events to `set-group-volume` commands, button events to `mute-group`/
+   `unmute-group` commands. Applies 30ms dial debounce and 200ms echo
+   suppression.
+4. **DeviceManager** — orchestrates the scan loop, reconciles detected devices
+   against `hardware.json` config, starts/stops sessions, watches config for
+   live enable/disable changes.
+
+### HardwareBridgeService
+
+The top-level `BackgroundService` that wires everything together:
+- Connects to the VolMon daemon via `IpcDuplexClient`
+- Creates `DeviceManager` with all registered `IDeviceDriver` instances
+- Subscribes to daemon `state-changed` events and broadcasts them to all
+  active device sessions
+
+### Config
+
+| File | Contents |
+|---|---|
+| `~/.config/volmon/hardware.json` | Master config: known devices, enabled/disabled state, scan interval |
+| `~/.config/volmon/beacn-mix-{serial}.json` | Per-device: display brightness, dim/off timeouts, volume step, layout |
+
+Both files are watched with `FileSystemWatcher` for live hot-reload. Enabling
+a device in the GUI (or editing `hardware.json`) triggers an immediate
+scan-and-reconcile cycle.
+
+### Display System (Beacn Mix)
+
+The Beacn Mix has an 800x480 LCD display driven by a JSON-based template
+system:
+
+- **DisplayLayout** — JSON file defining visual slots (text, bars, arcs,
+  images, rectangles) with data bindings like `{group.name}`,
+  `{group.volume}`, `{group.muted}`.
+- **TemplateRenderer** — renders the layout to a JPEG image using SkiaSharp.
+- **BindingResolver** — resolves `{group.*}` bindings against the current
+  `GroupDisplayState[]`.
+- Layout resolution: bundled `Layouts/` dir first, then config dir
+  (`~/.config/volmon/`), then hardcoded default. No files outside these
+  directories are read.
+
+Display updates are signal-based (`ManualResetEventSlim`) — the display is
+only re-rendered when state changes, not on a timer.
+
+### Adding a New Device
+
+See [src/VolMon.Hardware/README.md](./src/VolMon.Hardware/README.md) for a
+step-by-step guide to adding support for a new hardware device.
 
 ## Future Work
 

@@ -14,7 +14,16 @@ volumes natively through the system audio server.
 - **Auto-apply** — new audio streams are automatically matched and configured
 - **CLI + GUI** — manage groups from the terminal or a system tray app
 - **Daemon** — background service ensures volumes are applied even without the GUI
+- **Hardware control** — physical USB controllers (dials, buttons, displays) for hands-on volume management
+- **Hardware GUI** — configure and manage hardware devices, install the hardware daemon as a service
 - **KDE/GNOME/Windows/macOS** — GUI uses Avalonia UI for cross-platform tray support
+
+### Supported Hardware
+
+| Device | Dials | Buttons | Display | Status |
+|---|---|---|---|---|
+| [Beacn Mix](https://www.beacn.com/pages/beacn-mix) | 4 rotary encoders | 4 dial buttons | 800x480 LCD | Fully supported |
+| Beacn Mix Create | 4 rotary encoders | 4 dial buttons | 800x480 LCD | Detected, untested |
 
 ## Architecture
 
@@ -26,6 +35,7 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md)
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download) or later
 - Linux: PulseAudio or PipeWire (with PulseAudio compatibility)
+- Linux: `libusb-1.0` (for hardware daemon USB communication)
 - Optional: ImageMagick (only needed if regenerating icons from SVG)
 
 ### Linux (recommended)
@@ -37,17 +47,19 @@ The install script builds, publishes, and sets up everything:
 ```
 
 This will:
-- Publish self-contained binaries for the daemon, GUI, and CLI
-- Install them to `~/.local/bin/` (`volmon-daemon`, `volmon-gui`, `volmon`)
-- Install and enable the systemd user service (auto-starts the daemon)
-- Install the desktop entry and icon for your app launcher
+- Publish self-contained binaries for all 5 projects (daemon, GUI, CLI, hardware daemon, hardware GUI)
+- Install them to `~/.local/bin/` (`volmon-daemon`, `volmon-gui`, `volmon`, `volmon-hardware`, `volmon-hardware-gui`)
+- Install and enable systemd user services for both daemons (auto-start)
+- Install desktop entries and icon for your app launcher
 
 After installation:
 
 ```bash
-volmon-gui          # Launch the GUI
-volmon --help       # CLI usage
-systemctl --user status volmon   # Check daemon status
+volmon-gui              # Launch the volume group GUI
+volmon --help           # CLI usage
+volmon-hardware-gui     # Launch the hardware configuration GUI
+systemctl --user status volmon            # Check daemon status
+systemctl --user status volmon-hardware   # Check hardware daemon status
 ```
 
 > **Note:** Make sure `~/.local/bin` is in your PATH. Most distributions
@@ -60,7 +72,7 @@ systemctl --user status volmon   # Check daemon status
 ./install/install.sh --uninstall
 ```
 
-This stops the daemon, removes the systemd service, desktop entry, icon, and
+This stops both daemons, removes systemd services, desktop entries, icon, and
 all installed binaries.
 
 ### Development (run from source)
@@ -74,6 +86,12 @@ dotnet run --project src/VolMon.Daemon
 
 # In another terminal, start the GUI
 dotnet run --project src/VolMon.GUI
+
+# Start the hardware daemon (requires a connected USB device)
+dotnet run --project src/VolMon.Hardware
+
+# Start the hardware configuration GUI
+dotnet run --project src/VolMon.HardwareGUI
 
 # Or use VS Code — launch the "Daemon+GUI" compound configuration
 ```
@@ -119,6 +137,31 @@ volmon-gui
 ```
 
 The GUI runs as a system tray icon. Click it to open the volume group editor.
+
+## Hardware
+
+The hardware daemon (`VolMon.Hardware`) connects to USB controllers and bridges
+them to the VolMon daemon via IPC. Each physical dial maps to a volume group,
+dial rotation changes volume, and dial button press toggles mute. Devices with
+displays show group names, volumes, and mute states.
+
+See [src/VolMon.Hardware/README.md](./src/VolMon.Hardware/README.md) for
+architecture details, and
+[src/VolMon.Hardware/Beacn/Mix/README.md](./src/VolMon.Hardware/Beacn/Mix/README.md)
+for the Beacn Mix USB protocol documentation.
+
+### Hardware Config
+
+Hardware configuration lives alongside the main config:
+
+| File | Purpose |
+|---|---|
+| `~/.config/volmon/hardware.json` | Master config — lists all known devices, enabled/disabled state |
+| `~/.config/volmon/beacn-mix-{serial}.json` | Per-device config — display brightness, layout, volume step, timeouts |
+
+New devices are detected automatically and added to `hardware.json` as
+**disabled** by default. Use the Hardware GUI or edit the file directly to
+enable them.
 
 ## Config
 
@@ -179,10 +222,9 @@ audio driver (e.g. BlackHole) which is out of scope.
 
 | Library | Purpose | Platform |
 |---|---|---|
-| [Avalonia UI](https://github.com/AvaloniaUI/Avalonia) 11.2.7 | Cross-platform GUI framework | All |
+| [Avalonia UI](https://github.com/AvaloniaUI/Avalonia) 11.3.12 | Cross-platform GUI framework | All |
+| [ReactiveUI.Avalonia](https://github.com/reactiveui/ReactiveUI) 11.4.3 | MVVM framework for Avalonia | All |
 | [SharpHook](https://github.com/TolikPyl662/SharpHook) 7.1.1 | Global keyboard hooks for hotkeys | All |
 | [NAudio](https://github.com/naudio/NAudio) 2.2.1 | Windows Core Audio API (WASAPI) access | Windows |
-
-## License
-
-MIT
+| [LibUsbDotNet](https://github.com/LibUsbDotNet/LibUsbDotNet) 3.0.167-alpha | USB device communication | All |
+| [SkiaSharp](https://github.com/mono/SkiaSharp) 3.119.0 | Display rendering (JPEG generation) | Hardware daemon |

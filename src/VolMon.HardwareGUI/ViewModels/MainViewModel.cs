@@ -181,21 +181,40 @@ public sealed class MainViewModel : ReactiveObject, IDisposable
 
     // ── Daemon management (cross-platform) ────────────────────────────
 
-    private static async Task<bool> CheckDaemonRunningAsync()
+    private async Task<bool> CheckDaemonRunningAsync()
     {
         try
         {
             if (OperatingSystem.IsWindows())
             {
                 var result = await RunProcessAsync("tasklist", "/FI", "IMAGENAME eq VolMon.Hardware.exe", "/FO", "CSV", "/NH");
-                return result.Stdout.Contains("VolMon.Hardware", StringComparison.OrdinalIgnoreCase);
+                return result.Stdout.Contains("VolMon.Hardware.exe", StringComparison.OrdinalIgnoreCase);
             }
-            else
+
+            // If the service is installed, ask the service manager — this is the most
+            // reliable check since it doesn't depend on process name matching.
+            if (OperatingSystem.IsLinux() && CheckDaemonInstalled())
             {
-                // Linux and macOS both have pgrep
-                var result = await RunProcessAsync("pgrep", "-f", "VolMon.Hardware");
+                var result = await RunProcessAsync("systemctl", "--user", "is-active", LinuxServiceName);
                 return result.ExitCode == 0;
             }
+
+            if (OperatingSystem.IsMacOS() && CheckDaemonInstalled())
+            {
+                // launchctl print returns 0 if the service is loaded
+                var result = await RunProcessAsync("launchctl", "print", $"gui/{GetUid()}/{MacOsAgentLabel}");
+                return result.ExitCode == 0;
+            }
+
+            // Fallback for non-service mode: search for exact process names.
+            // The published binary is "VolMon.Hardware" but when launched via the
+            // "volmon-hardware" symlink, the process name is "volmon-hardware".
+            // Check both names.
+            var check1 = await RunProcessAsync("pgrep", "-x", "VolMon.Hardware");
+            if (check1.ExitCode == 0) return true;
+
+            var check2 = await RunProcessAsync("pgrep", "-x", "volmon-hardware");
+            return check2.ExitCode == 0;
         }
         catch
         {
@@ -269,11 +288,16 @@ public sealed class MainViewModel : ReactiveObject, IDisposable
         }
         else
         {
-            // Kill the process directly
+            // Kill the process directly — use -x for exact name match
+            // to avoid killing VolMon.HardwareGUI (this process).
+            // Try both names: "VolMon.Hardware" (direct) and "volmon-hardware" (symlink).
             if (OperatingSystem.IsWindows())
                 await RunProcessAsync("taskkill", "/F", "/IM", "VolMon.Hardware.exe");
             else
-                await RunProcessAsync("pkill", "-f", "VolMon.Hardware");
+            {
+                await RunProcessAsync("pkill", "-x", "VolMon.Hardware");
+                await RunProcessAsync("pkill", "-x", "volmon-hardware");
+            }
         }
 
         await Task.Delay(500);

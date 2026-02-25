@@ -214,6 +214,27 @@ public sealed class StreamWatcher : IDisposable
                     _logger.LogWarning(ex, "Failed to apply settings to virtual sink {SinkName}", vsink.SinkName);
                 }
             }
+
+            // Pinned streams are not on the virtual sink — apply direct volume.
+            var pinnedStreams = _activeStreams.Values
+                .Where(s => s.AssignedGroup == group.Id && s.IsPinned)
+                .ToArray();
+            foreach (var stream in pinnedStreams)
+            {
+                try
+                {
+                    await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
+                    await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
+                    stream.Volume = group.Volume;
+                    stream.Muted = group.Muted;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex,
+                        "Failed to apply direct volume to pinned stream {StreamId}",
+                        stream.Id);
+                }
+            }
         }
         else
         {
@@ -593,10 +614,26 @@ public sealed class StreamWatcher : IDisposable
     /// <summary>
     /// Moves a stream into the group's virtual null-sink. The stream's individual
     /// volume is left untouched — only the virtual sink's volume matters.
+    /// Pinned streams (<see cref="AudioStream.IsPinned"/>) cannot be moved, so they
+    /// receive direct volume control instead.
     /// </summary>
     private async Task RouteStreamToVirtualSinkAsync(
         AudioStream stream, AudioGroup group, CancellationToken ct = default)
     {
+        // Pinned streams (node.dont-reconnect = true) refuse sink moves.
+        // Fall back to direct volume control for this individual stream.
+        if (stream.IsPinned)
+        {
+            _logger.LogInformation(
+                "Stream {StreamId} ({Binary}) is pinned — using direct volume for Compatibility group '{Group}'",
+                stream.Id, stream.BinaryName, group.Name);
+            await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
+            await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
+            stream.Volume = group.Volume;
+            stream.Muted = group.Muted;
+            return;
+        }
+
         if (!_virtualSinks.TryGetValue(group.Id, out var vsink))
         {
             if (FallbackToDirectVolume)

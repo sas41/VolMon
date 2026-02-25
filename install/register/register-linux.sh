@@ -2,16 +2,18 @@
 #
 # VolMon registration script for Linux
 #
-# Registers the daemon and hardware daemon as systemd user services,
-# and the GUI and hardware GUI as XDG autostart/desktop applications.
-# All start automatically on login.
+# Registers the daemon as a systemd user service and the GUI as an XDG
+# autostart/desktop application. Optionally registers the hardware
+# daemon and hardware GUI when --include-hardware is passed.
+# All registered components start automatically on login.
 #
 # Run from inside the publish/linux-x64/ folder (or wherever the
 # VolMon binaries are located).
 #
 # Usage:
-#   ./register.sh              # register (install + enable + start)
-#   ./register.sh --unregister # stop, disable, and remove everything
+#   ./register.sh                              # core only
+#   ./register.sh --include-hardware           # core + hardware
+#   ./register.sh --unregister                 # stop, disable, and remove everything
 #
 set -euo pipefail
 
@@ -36,6 +38,21 @@ AUTOSTART_FILE="$AUTOSTART_DIR/volmon-gui.desktop"
 DESKTOP_FILE="$APPS_DIR/volmon.desktop"
 HARDWARE_DESKTOP_FILE="$APPS_DIR/volmon-hardware-gui.desktop"
 ICON_FILE="$ICON_DIR/256x256/apps/volmon.png"
+
+# ── Parse flags ───────────────────────────────────────────────────────
+INCLUDE_HARDWARE=false
+UNREGISTER=false
+for arg in "$@"; do
+    case "$arg" in
+        --include-hardware) INCLUDE_HARDWARE=true ;;
+        --unregister)       UNREGISTER=true ;;
+        *)
+            echo "Unknown option: $arg"
+            echo "Usage: $0 [--include-hardware] [--unregister]"
+            exit 1
+            ;;
+    esac
+done
 
 # ── Colors ────────────────────────────────────────────────────────────
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
@@ -72,12 +89,17 @@ unregister() {
     exit 0
 }
 
-if [[ "${1:-}" == "--unregister" ]]; then
+if $UNREGISTER; then
     unregister
 fi
 
 # ── Validate binaries ────────────────────────────────────────────────
-for bin in "$DAEMON_BIN" "$GUI_BIN" "$HARDWARE_BIN" "$HARDWARE_GUI_BIN"; do
+REQUIRED_BINS=("$DAEMON_BIN" "$GUI_BIN")
+if $INCLUDE_HARDWARE; then
+    REQUIRED_BINS+=("$HARDWARE_BIN" "$HARDWARE_GUI_BIN")
+fi
+
+for bin in "${REQUIRED_BINS[@]}"; do
     if [[ ! -f "$bin" ]]; then
         red "Error: $(basename "$bin") not found in $SCRIPT_DIR"
         red "Run this script from the publish/linux-x64/ folder."
@@ -109,10 +131,11 @@ systemctl --user enable "$SERVICE_NAME"
 systemctl --user restart "$SERVICE_NAME"
 green "  Daemon service installed and started."
 
-# ── Hardware Daemon: systemd user service ────────────────────────────
-bold "Installing systemd user service (hardware daemon)..."
+# ── Hardware Daemon: systemd user service (optional) ─────────────────
+if $INCLUDE_HARDWARE; then
+    bold "Installing systemd user service (hardware daemon)..."
 
-cat > "$HARDWARE_SERVICE_FILE" <<EOF
+    cat > "$HARDWARE_SERVICE_FILE" <<EOF
 [Unit]
 Description=VolMon Hardware Daemon
 After=volmon.service
@@ -128,10 +151,11 @@ RestartSec=5
 WantedBy=default.target
 EOF
 
-systemctl --user daemon-reload
-systemctl --user enable "$HARDWARE_SERVICE_NAME"
-systemctl --user restart "$HARDWARE_SERVICE_NAME"
-green "  Hardware daemon service installed and started."
+    systemctl --user daemon-reload
+    systemctl --user enable "$HARDWARE_SERVICE_NAME"
+    systemctl --user restart "$HARDWARE_SERVICE_NAME"
+    green "  Hardware daemon service installed and started."
+fi
 
 # ── GUI: XDG autostart ───────────────────────────────────────────────
 bold "Installing GUI autostart entry..."
@@ -168,7 +192,8 @@ Keywords=volume;audio;mixer;sound;group;
 StartupNotify=true
 EOF
 
-cat > "$HARDWARE_DESKTOP_FILE" <<EOF
+if $INCLUDE_HARDWARE; then
+    cat > "$HARDWARE_DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=VolMon Hardware Manager
@@ -180,6 +205,7 @@ Categories=AudioVideo;Audio;Mixer;Settings;HardwareSettings;
 Keywords=volume;audio;mixer;hardware;beacn;
 StartupNotify=true
 EOF
+fi
 
 green "  Desktop entries installed (visible in application launcher)."
 
@@ -199,8 +225,16 @@ echo ""
 green "VolMon registered successfully!"
 echo ""
 echo "  Daemon status:    systemctl --user status $SERVICE_NAME"
-echo "  Hardware status:  systemctl --user status $HARDWARE_SERVICE_NAME"
+if $INCLUDE_HARDWARE; then
+    echo "  Hardware status:  systemctl --user status $HARDWARE_SERVICE_NAME"
+fi
 echo "  Start GUI now:    $GUI_BIN"
-echo "  Hardware GUI:     $HARDWARE_GUI_BIN"
+if $INCLUDE_HARDWARE; then
+    echo "  Hardware GUI:     $HARDWARE_GUI_BIN"
+fi
 echo "  Unregister:       $0 --unregister"
+if ! $INCLUDE_HARDWARE; then
+    echo ""
+    echo "  Hardware was not registered. To include it, re-run with --include-hardware"
+fi
 echo ""

@@ -4,22 +4,29 @@
     VolMon registration script for Windows.
 
 .DESCRIPTION
-    Registers the daemon and hardware daemon as Windows Task Scheduler
-    tasks that run at logon (hidden, auto-restart on failure) and places
-    shortcuts to both GUIs in the user's Startup folder so they launch
-    on login.
+    Registers the daemon as a Windows Task Scheduler task that runs at
+    logon (hidden, auto-restart on failure) and places a shortcut to the
+    GUI in the user's Startup folder so it launches on login.
+
+    Optionally registers the hardware daemon and hardware GUI when
+    -IncludeHardware is passed.
 
     Run from inside the publish\win-x64\ folder (or wherever the
     VolMon binaries are located).
+
+.PARAMETER IncludeHardware
+    Also register the hardware daemon and hardware GUI.
 
 .PARAMETER Unregister
     Remove the scheduled tasks and startup shortcuts.
 
 .EXAMPLE
     .\register.ps1
+    .\register.ps1 -IncludeHardware
     .\register.ps1 -Unregister
 #>
 param(
+    [switch]$IncludeHardware,
     [switch]$Unregister
 )
 
@@ -67,7 +74,12 @@ if ($Unregister) {
 }
 
 # ── Validate binaries ────────────────────────────────────────────────
-foreach ($bin in @($DaemonExe, $GuiExe, $HardwareExe, $HardwareGuiExe)) {
+$RequiredBins = @($DaemonExe, $GuiExe)
+if ($IncludeHardware) {
+    $RequiredBins += @($HardwareExe, $HardwareGuiExe)
+}
+
+foreach ($bin in $RequiredBins) {
     if (-not (Test-Path $bin)) {
         Write-Host "Error: $(Split-Path -Leaf $bin) not found in $ScriptDir" -ForegroundColor Red
         Write-Host 'Run this script from the publish\win-x64\ folder.' -ForegroundColor Red
@@ -138,10 +150,12 @@ Write-Host 'Installing daemon scheduled task...' -ForegroundColor Cyan
 Register-DaemonTask -Name $TaskName -ExePath $DaemonExe `
     -Description 'VolMon Audio Group Volume Daemon'
 
-# ── Hardware Daemon: Task Scheduler ──────────────────────────────────
-Write-Host 'Installing hardware daemon scheduled task...' -ForegroundColor Cyan
-Register-DaemonTask -Name $HardwareTaskName -ExePath $HardwareExe `
-    -Description 'VolMon Hardware Daemon'
+# ── Hardware Daemon: Task Scheduler (optional) ───────────────────────
+if ($IncludeHardware) {
+    Write-Host 'Installing hardware daemon scheduled task...' -ForegroundColor Cyan
+    Register-DaemonTask -Name $HardwareTaskName -ExePath $HardwareExe `
+        -Description 'VolMon Hardware Daemon'
+}
 
 # ── GUI: Startup folder shortcut ─────────────────────────────────────
 Write-Host 'Installing GUI startup shortcut...' -ForegroundColor Cyan
@@ -149,19 +163,29 @@ New-StartupShortcut -ShortcutPath $GuiShortcut -TargetExe $GuiExe `
     -Description 'VolMon Volume Monitoring and Control'
 Write-Host '  GUI will start automatically on next login.' -ForegroundColor Green
 
-# ── Hardware GUI: Startup folder shortcut ────────────────────────────
-Write-Host 'Installing Hardware GUI startup shortcut...' -ForegroundColor Cyan
-New-StartupShortcut -ShortcutPath $HwGuiShortcut -TargetExe $HardwareGuiExe `
-    -Description 'VolMon Hardware Device Manager'
-Write-Host '  Hardware GUI will start automatically on next login.' -ForegroundColor Green
+# ── Hardware GUI: Startup folder shortcut (optional) ─────────────────
+if ($IncludeHardware) {
+    Write-Host 'Installing Hardware GUI startup shortcut...' -ForegroundColor Cyan
+    New-StartupShortcut -ShortcutPath $HwGuiShortcut -TargetExe $HardwareGuiExe `
+        -Description 'VolMon Hardware Device Manager'
+    Write-Host '  Hardware GUI will start automatically on next login.' -ForegroundColor Green
+}
 
 # ── Done ──────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host 'VolMon registered successfully!' -ForegroundColor Green
 Write-Host ''
 Write-Host "  Daemon task:    Get-ScheduledTask -TaskName '$TaskName'"
-Write-Host "  Hardware task:  Get-ScheduledTask -TaskName '$HardwareTaskName'"
+if ($IncludeHardware) {
+    Write-Host "  Hardware task:  Get-ScheduledTask -TaskName '$HardwareTaskName'"
+}
 Write-Host "  Start GUI:      $GuiExe"
-Write-Host "  Hardware GUI:   $HardwareGuiExe"
+if ($IncludeHardware) {
+    Write-Host "  Hardware GUI:   $HardwareGuiExe"
+}
 Write-Host "  Unregister:     .\register.ps1 -Unregister"
+if (-not $IncludeHardware) {
+    Write-Host ''
+    Write-Host '  Hardware was not registered. To include it, re-run with -IncludeHardware'
+}
 Write-Host ''

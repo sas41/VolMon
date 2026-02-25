@@ -26,6 +26,13 @@ public sealed class AudioStream
     /// <summary>OS process ID, if available.</summary>
     public int? ProcessId { get; init; }
 
+    /// <summary>
+    /// When <c>true</c> the stream has <c>node.dont-reconnect</c> set and cannot be
+    /// moved to a different sink. Compatibility-mode groups must fall back to direct
+    /// volume control for pinned streams.
+    /// </summary>
+    public bool IsPinned { get; init; }
+
     /// <summary>GUID of the group this stream has been assigned to, if any.</summary>
     public Guid? AssignedGroup { get; set; }
 

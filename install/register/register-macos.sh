@@ -2,16 +2,18 @@
 #
 # VolMon registration script for macOS
 #
-# Registers the daemon, hardware daemon, and GUIs as launchd user
-# agents so they start automatically on login. Wraps each GUI in a
+# Registers the daemon and GUI as launchd user agents so they start
+# automatically on login. Optionally registers the hardware daemon and
+# hardware GUI when --include-hardware is passed. Wraps each GUI in a
 # minimal .app bundle so macOS displays correct icons.
 #
 # Run from inside the publish/osx-x64/ folder (or wherever the
 # VolMon binaries are located).
 #
 # Usage:
-#   ./register.sh              # register (install + load + start)
-#   ./register.sh --unregister # unload and remove everything
+#   ./register.sh                              # core only
+#   ./register.sh --include-hardware           # core + hardware
+#   ./register.sh --unregister                 # unload and remove everything
 #
 set -euo pipefail
 
@@ -36,6 +38,21 @@ HARDWARE_GUI_PLIST="$LAUNCH_AGENTS/$HARDWARE_GUI_LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/VolMon"
 APP_BUNDLE="$HOME/Applications/VolMon.app"
 HARDWARE_APP_BUNDLE="$HOME/Applications/VolMon Hardware Manager.app"
+
+# ── Parse flags ───────────────────────────────────────────────────────
+INCLUDE_HARDWARE=false
+UNREGISTER=false
+for arg in "$@"; do
+    case "$arg" in
+        --include-hardware) INCLUDE_HARDWARE=true ;;
+        --unregister)       UNREGISTER=true ;;
+        *)
+            echo "Unknown option: $arg"
+            echo "Usage: $0 [--include-hardware] [--unregister]"
+            exit 1
+            ;;
+    esac
+done
 
 # ── Colors ────────────────────────────────────────────────────────────
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
@@ -62,12 +79,17 @@ unregister() {
     exit 0
 }
 
-if [[ "${1:-}" == "--unregister" ]]; then
+if $UNREGISTER; then
     unregister
 fi
 
 # ── Validate binaries ────────────────────────────────────────────────
-for bin in "$DAEMON_BIN" "$GUI_BIN" "$HARDWARE_BIN" "$HARDWARE_GUI_BIN"; do
+REQUIRED_BINS=("$DAEMON_BIN" "$GUI_BIN")
+if $INCLUDE_HARDWARE; then
+    REQUIRED_BINS+=("$HARDWARE_BIN" "$HARDWARE_GUI_BIN")
+fi
+
+for bin in "${REQUIRED_BINS[@]}"; do
     if [[ ! -f "$bin" ]]; then
         red "Error: $(basename "$bin") not found in $SCRIPT_DIR"
         red "Run this script from the publish/osx-x64/ folder."
@@ -170,9 +192,11 @@ bold "Creating VolMon.app bundle..."
 create_app_bundle "$APP_BUNDLE" "VolMon" "com.volmon.gui" "$GUI_BIN" "VolMon"
 green "  VolMon.app created at $APP_BUNDLE"
 
-bold "Creating VolMon Hardware Manager.app bundle..."
-create_app_bundle "$HARDWARE_APP_BUNDLE" "VolMon Hardware Manager" "com.volmon.hardware-gui" "$HARDWARE_GUI_BIN" "VolMon Hardware Manager"
-green "  VolMon Hardware Manager.app created at $HARDWARE_APP_BUNDLE"
+if $INCLUDE_HARDWARE; then
+    bold "Creating VolMon Hardware Manager.app bundle..."
+    create_app_bundle "$HARDWARE_APP_BUNDLE" "VolMon Hardware Manager" "com.volmon.hardware-gui" "$HARDWARE_GUI_BIN" "VolMon Hardware Manager"
+    green "  VolMon Hardware Manager.app created at $HARDWARE_APP_BUNDLE"
+fi
 
 # ── Daemon: launchd user agent ───────────────────────────────────────
 bold "Installing daemon launch agent..."
@@ -214,10 +238,11 @@ EOF
 install_agent "$DAEMON_LABEL" "$DAEMON_PLIST"
 green "  Daemon agent installed and started."
 
-# ── Hardware Daemon: launchd user agent ──────────────────────────────
-bold "Installing hardware daemon launch agent..."
+# ── Hardware Daemon: launchd user agent (optional) ───────────────────
+if $INCLUDE_HARDWARE; then
+    bold "Installing hardware daemon launch agent..."
 
-cat > "$HARDWARE_PLIST" <<EOF
+    cat > "$HARDWARE_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -251,8 +276,9 @@ cat > "$HARDWARE_PLIST" <<EOF
 </plist>
 EOF
 
-install_agent "$HARDWARE_LABEL" "$HARDWARE_PLIST"
-green "  Hardware daemon agent installed and started."
+    install_agent "$HARDWARE_LABEL" "$HARDWARE_PLIST"
+    green "  Hardware daemon agent installed and started."
+fi
 
 # ── GUI: launchd user agent ──────────────────────────────────────────
 bold "Installing GUI launch agent..."
@@ -294,10 +320,18 @@ green "  GUI agent installed and started."
 echo ""
 green "VolMon registered successfully!"
 echo ""
-echo "  App bundles:    $APP_BUNDLE"
-echo "                  $HARDWARE_APP_BUNDLE"
+echo "  App bundle:     $APP_BUNDLE"
+if $INCLUDE_HARDWARE; then
+    echo "  Hardware app:   $HARDWARE_APP_BUNDLE"
+fi
 echo "  Daemon logs:    $LOG_DIR/daemon-*.log"
-echo "  Hardware logs:  $LOG_DIR/hardware-*.log"
+if $INCLUDE_HARDWARE; then
+    echo "  Hardware logs:  $LOG_DIR/hardware-*.log"
+fi
 echo "  GUI logs:       $LOG_DIR/gui-*.log"
 echo "  Unregister:     $0 --unregister"
+if ! $INCLUDE_HARDWARE; then
+    echo ""
+    echo "  Hardware was not registered. To include it, re-run with --include-hardware"
+fi
 echo ""

@@ -325,6 +325,13 @@ public sealed class LinuxPulseBackend : IAudioBackend
                 ?? appName
                 ?? "unknown";
 
+            // PipeWire sets "node.dont-reconnect" on streams that refuse sink moves
+            // (e.g. WebRTC duplex streams with a hard-coded target device).
+            var dontReconnect = proplist != IntPtr.Zero
+                ? PtrToStringUtf8(pa_proplist_gets(proplist, "node.dont-reconnect"))
+                : null;
+            var isPinned = string.Equals(dontReconnect, "true", StringComparison.OrdinalIgnoreCase);
+
             streams.Add(new AudioStream
             {
                 Id = info.index.ToString(),
@@ -332,7 +339,8 @@ public sealed class LinuxPulseBackend : IAudioBackend
                 ApplicationClass = appName,
                 Volume = CvolumeToPercent(ref info.volume),
                 Muted = info.mute != 0,
-                ProcessId = pid
+                ProcessId = pid,
+                IsPinned = isPinned
             });
         };
 

@@ -39,27 +39,41 @@ internal sealed class BeacnMixController : IHardwareController
     public event EventHandler<DialRotatedEventArgs>? DialRotated;
     public event EventHandler<ButtonPressedEventArgs>? ButtonPressed;
 
+    public string DeviceId { get; private set; } = "";
     public string DeviceName => "Beacn Mix";
     public int DialCount => 4;
     public bool IsConnected => _device.IsOpen;
-
-    /// <summary>Volume step per dial delta, configurable.</summary>
     public int VolumeStepPerDelta => _config.VolumeStepPerDelta;
+    public bool HasDisplay => true;
 
-    public BeacnMixController(ILogger<BeacnMixController> logger)
+    /// <summary>
+    /// Create a controller for a specific Beacn Mix device.
+    /// </summary>
+    /// <param name="logger">Logger instance.</param>
+    /// <param name="targetSerial">
+    /// Serial number of the specific device to connect to.
+    /// If null, connects to the first available Beacn Mix.
+    /// </param>
+    public BeacnMixController(ILogger<BeacnMixController> logger, string? targetSerial = null)
     {
         _logger = logger;
+        _targetSerial = targetSerial;
     }
+
+    private readonly string? _targetSerial;
 
     public async Task StartAsync(CancellationToken ct)
     {
         _logger.LogInformation("Looking for Beacn Mix device...");
 
-        if (!_device.TryOpen())
+        if (!_device.TryOpen(_targetSerial))
         {
-            _logger.LogWarning("Beacn Mix not found. Will retry on next start.");
+            _logger.LogWarning("Beacn Mix not found (serial={Serial}). Will retry on next start.",
+                _targetSerial ?? "any");
             return;
         }
+
+        DeviceId = $"beacn-mix-{_device.SerialNumber}";
 
         _logger.LogInformation(
             "Connected to Beacn Mix (FW {Version}, Serial {Serial})",

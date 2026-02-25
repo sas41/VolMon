@@ -32,9 +32,10 @@ internal sealed class BeacnMixDevice : IDisposable
 
     /// <summary>
     /// Attempt to find and open a Beacn Mix device.
+    /// If <paramref name="targetSerial"/> is specified, only that device is opened.
     /// Returns true if a device was found and opened successfully.
     /// </summary>
-    public bool TryOpen()
+    public bool TryOpen(string? targetSerial = null)
     {
         if (IsOpen) return true;
 
@@ -76,6 +77,14 @@ internal sealed class BeacnMixDevice : IDisposable
 
             // Get device info (firmware version + serial)
             GetDeviceInfo();
+
+            // If a specific serial was requested, verify it matches
+            if (targetSerial is not null &&
+                !string.Equals(SerialNumber, targetSerial, StringComparison.OrdinalIgnoreCase))
+            {
+                Close();
+                return false;
+            }
 
             return true;
         }

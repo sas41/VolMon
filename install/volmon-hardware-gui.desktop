@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=VolMon Hardware Manager
+Comment=Configure VolMon hardware devices
+Exec=volmon-hardware-gui
+Icon=volmon
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Mixer;Settings;HardwareSettings;
+Keywords=volume;audio;mixer;hardware;beacn;
+StartupNotify=true

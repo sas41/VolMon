@@ -1,7 +1,7 @@
 using Avalonia;
 using ReactiveUI.Avalonia;
 
-namespace VolMon.GUI;
+namespace VolMon.HardwareGUI;
 
 public static class Program
 {

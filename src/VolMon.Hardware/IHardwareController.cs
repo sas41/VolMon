@@ -25,6 +25,18 @@ public sealed class ButtonPressedEventArgs : EventArgs
 }
 
 /// <summary>
+/// Represents the state of a single group/dial for display rendering.
+/// Generic across all device types that have displays.
+/// </summary>
+public readonly struct GroupDisplayState
+{
+    public string Name { get; init; }
+    public int Volume { get; init; }
+    public bool Muted { get; init; }
+    public string? Color { get; init; }
+}
+
+/// <summary>
 /// Abstraction for a physical hardware controller that can control audio groups.
 /// Each controller runs as a background service and raises events when the user
 /// interacts with physical controls (dials, buttons, etc.).
@@ -37,6 +49,12 @@ public interface IHardwareController : IAsyncDisposable
     /// <summary>Raised when a button is pressed or released.</summary>
     event EventHandler<ButtonPressedEventArgs>? ButtonPressed;
 
+    /// <summary>
+    /// Unique device identifier (e.g. "beacn-mix-0041220700598").
+    /// Used as the key in hardware.json and for per-device config files.
+    /// </summary>
+    string DeviceId { get; }
+
     /// <summary>Human-readable name of this controller (e.g. "Beacn Mix").</summary>
     string DeviceName { get; }
 
@@ -45,6 +63,12 @@ public interface IHardwareController : IAsyncDisposable
 
     /// <summary>Whether the controller is currently connected.</summary>
     bool IsConnected { get; }
+
+    /// <summary>Volume change per unit of dial rotation (percentage points).</summary>
+    int VolumeStepPerDelta { get; }
+
+    /// <summary>Whether this device has a display that can show group state.</summary>
+    bool HasDisplay { get; }
 
     /// <summary>
     /// Start the controller. Opens the device, begins polling for input.
@@ -61,4 +85,10 @@ public interface IHardwareController : IAsyncDisposable
     /// Color is RGBA (0-255 per channel).
     /// </summary>
     Task SetDialColorAsync(int dialIndex, byte r, byte g, byte b, byte a = 255);
+
+    /// <summary>
+    /// Update the display with the current group state.
+    /// No-op for devices without a display.
+    /// </summary>
+    void UpdateDisplay(GroupDisplayState[] groups);
 }

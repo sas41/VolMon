@@ -1,0 +1,13 @@
+[Unit]
+Description=VolMon Hardware Daemon
+After=volmon.service
+Wants=volmon.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/volmon-hardware
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

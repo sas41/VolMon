@@ -2,12 +2,12 @@
 #
 # VolMon registration script for macOS
 #
-# Registers the daemon and GUI as launchd user agents so they start
-# automatically on login. Wraps the GUI in a minimal .app bundle so
-# macOS displays the correct icon in the Dock and app switcher.
+# Registers the daemon, hardware daemon, and GUIs as launchd user
+# agents so they start automatically on login. Wraps each GUI in a
+# minimal .app bundle so macOS displays correct icons.
 #
 # Run from inside the publish/osx-x64/ folder (or wherever the
-# VolMon.Daemon and VolMon.GUI binaries are located).
+# VolMon binaries are located).
 #
 # Usage:
 #   ./register.sh              # register (install + load + start)
@@ -19,16 +19,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DAEMON_BIN="$SCRIPT_DIR/VolMon.Daemon"
 GUI_BIN="$SCRIPT_DIR/VolMon.GUI"
+HARDWARE_BIN="$SCRIPT_DIR/VolMon.Hardware"
+HARDWARE_GUI_BIN="$SCRIPT_DIR/VolMon.HardwareGUI"
 ICON_SRC="$SCRIPT_DIR/volmon.png"
 
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 DAEMON_LABEL="com.volmon.daemon"
 GUI_LABEL="com.volmon.gui"
+HARDWARE_LABEL="com.volmon.hardware"
+HARDWARE_GUI_LABEL="com.volmon.hardware-gui"
 DAEMON_PLIST="$LAUNCH_AGENTS/$DAEMON_LABEL.plist"
 GUI_PLIST="$LAUNCH_AGENTS/$GUI_LABEL.plist"
+HARDWARE_PLIST="$LAUNCH_AGENTS/$HARDWARE_LABEL.plist"
+HARDWARE_GUI_PLIST="$LAUNCH_AGENTS/$HARDWARE_GUI_LABEL.plist"
 
 LOG_DIR="$HOME/Library/Logs/VolMon"
 APP_BUNDLE="$HOME/Applications/VolMon.app"
+HARDWARE_APP_BUNDLE="$HOME/Applications/VolMon Hardware Manager.app"
 
 # ── Colors ────────────────────────────────────────────────────────────
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
@@ -39,7 +46,7 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 unregister() {
     bold "Unregistering VolMon..."
 
-    for label in "$DAEMON_LABEL" "$GUI_LABEL"; do
+    for label in "$DAEMON_LABEL" "$GUI_LABEL" "$HARDWARE_LABEL" "$HARDWARE_GUI_LABEL"; do
         if launchctl list "$label" &>/dev/null; then
             launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || \
                 launchctl unload "$LAUNCH_AGENTS/$label.plist" 2>/dev/null || true
@@ -47,10 +54,9 @@ unregister() {
         rm -f "$LAUNCH_AGENTS/$label.plist"
     done
 
-    # Remove .app bundle
-    if [[ -d "$APP_BUNDLE" ]]; then
-        rm -rf "$APP_BUNDLE"
-    fi
+    # Remove .app bundles
+    rm -rf "$APP_BUNDLE"
+    rm -rf "$HARDWARE_APP_BUNDLE"
 
     green "VolMon unregistered."
     exit 0
@@ -61,7 +67,7 @@ if [[ "${1:-}" == "--unregister" ]]; then
 fi
 
 # ── Validate binaries ────────────────────────────────────────────────
-for bin in "$DAEMON_BIN" "$GUI_BIN"; do
+for bin in "$DAEMON_BIN" "$GUI_BIN" "$HARDWARE_BIN" "$HARDWARE_GUI_BIN"; do
     if [[ ! -f "$bin" ]]; then
         red "Error: $(basename "$bin") not found in $SCRIPT_DIR"
         red "Run this script from the publish/osx-x64/ folder."
@@ -74,40 +80,43 @@ done
 mkdir -p "$LAUNCH_AGENTS"
 mkdir -p "$LOG_DIR"
 
-# ── GUI: .app bundle ─────────────────────────────────────────────────
-# Wrap the GUI binary in a minimal .app bundle so macOS shows the
-# correct icon in the Dock, app switcher, and Spotlight.
-bold "Creating VolMon.app bundle..."
+# ── Helper: create .app bundle ───────────────────────────────────────
+create_app_bundle() {
+    local app_path="$1"
+    local display_name="$2"
+    local bundle_id="$3"
+    local exec_bin="$4"
+    local exec_name="$5"
 
-CONTENTS="$APP_BUNDLE/Contents"
-MACOS_DIR="$CONTENTS/MacOS"
-RESOURCES="$CONTENTS/Resources"
+    local contents="$app_path/Contents"
+    local macos_dir="$contents/MacOS"
+    local resources="$contents/Resources"
 
-rm -rf "$APP_BUNDLE"
-mkdir -p "$MACOS_DIR" "$RESOURCES"
+    rm -rf "$app_path"
+    mkdir -p "$macos_dir" "$resources"
 
-# Launcher script that execs the real binary
-cat > "$MACOS_DIR/VolMon" <<LAUNCHER
+    # Launcher script that execs the real binary
+    cat > "$macos_dir/$exec_name" <<LAUNCHER
 #!/usr/bin/env bash
-exec "$GUI_BIN" "\$@"
+exec "$exec_bin" "\$@"
 LAUNCHER
-chmod +x "$MACOS_DIR/VolMon"
+    chmod +x "$macos_dir/$exec_name"
 
-# Info.plist
-cat > "$CONTENTS/Info.plist" <<PLIST
+    # Info.plist
+    cat > "$contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>VolMon</string>
+    <string>$display_name</string>
     <key>CFBundleDisplayName</key>
-    <string>VolMon</string>
+    <string>$display_name</string>
     <key>CFBundleIdentifier</key>
-    <string>com.volmon.gui</string>
+    <string>$bundle_id</string>
     <key>CFBundleExecutable</key>
-    <string>VolMon</string>
+    <string>$exec_name</string>
     <key>CFBundleIconFile</key>
     <string>volmon</string>
     <key>CFBundlePackageType</key>
@@ -124,34 +133,46 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Convert PNG to icns if sips is available (it ships with macOS)
-if [[ -f "$ICON_SRC" ]]; then
-    if command -v sips &>/dev/null && command -v iconutil &>/dev/null; then
-        ICONSET=$(mktemp -d)/volmon.iconset
-        mkdir -p "$ICONSET"
-        # Generate all required sizes from the 256px source
-        for sz in 16 32 64 128 256; do
-            sips -z $sz $sz "$ICON_SRC" --out "$ICONSET/icon_${sz}x${sz}.png" &>/dev/null
-        done
-        # Retina variants (NxN@2x uses the next size up)
-        cp "$ICONSET/icon_32x32.png"   "$ICONSET/icon_16x16@2x.png"
-        cp "$ICONSET/icon_64x64.png"   "$ICONSET/icon_32x32@2x.png"
-        cp "$ICONSET/icon_256x256.png" "$ICONSET/icon_128x128@2x.png"
-        # Remove the non-standard 64x64
-        rm -f "$ICONSET/icon_64x64.png"
-        iconutil -c icns -o "$RESOURCES/volmon.icns" "$ICONSET" 2>/dev/null && \
-            green "  App icon created (icns)." || \
-            cp "$ICON_SRC" "$RESOURCES/volmon.png"
-        rm -rf "$(dirname "$ICONSET")"
-    else
-        # Fallback: just copy the PNG (won't show in Dock but bundle still works)
-        cp "$ICON_SRC" "$RESOURCES/volmon.png"
+    # Convert PNG to icns if tools are available
+    if [[ -f "$ICON_SRC" ]]; then
+        if command -v sips &>/dev/null && command -v iconutil &>/dev/null; then
+            local iconset
+            iconset=$(mktemp -d)/volmon.iconset
+            mkdir -p "$iconset"
+            for sz in 16 32 64 128 256; do
+                sips -z $sz $sz "$ICON_SRC" --out "$iconset/icon_${sz}x${sz}.png" &>/dev/null
+            done
+            cp "$iconset/icon_32x32.png"   "$iconset/icon_16x16@2x.png"
+            cp "$iconset/icon_64x64.png"   "$iconset/icon_32x32@2x.png"
+            cp "$iconset/icon_256x256.png" "$iconset/icon_128x128@2x.png"
+            rm -f "$iconset/icon_64x64.png"
+            iconutil -c icns -o "$resources/volmon.icns" "$iconset" 2>/dev/null || \
+                cp "$ICON_SRC" "$resources/volmon.png"
+            rm -rf "$(dirname "$iconset")"
+        else
+            cp "$ICON_SRC" "$resources/volmon.png"
+        fi
     fi
-else
-    echo "  Warning: volmon.png not found, .app bundle will have no icon."
-fi
+}
 
+# ── Helper: install launchd agent ────────────────────────────────────
+install_agent() {
+    local label="$1"
+    local plist_path="$2"
+
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$plist_path" 2>/dev/null || \
+        launchctl load -w "$plist_path"
+}
+
+# ── GUI: .app bundles ────────────────────────────────────────────────
+bold "Creating VolMon.app bundle..."
+create_app_bundle "$APP_BUNDLE" "VolMon" "com.volmon.gui" "$GUI_BIN" "VolMon"
 green "  VolMon.app created at $APP_BUNDLE"
+
+bold "Creating VolMon Hardware Manager.app bundle..."
+create_app_bundle "$HARDWARE_APP_BUNDLE" "VolMon Hardware Manager" "com.volmon.hardware-gui" "$HARDWARE_GUI_BIN" "VolMon Hardware Manager"
+green "  VolMon Hardware Manager.app created at $HARDWARE_APP_BUNDLE"
 
 # ── Daemon: launchd user agent ───────────────────────────────────────
 bold "Installing daemon launch agent..."
@@ -190,17 +211,52 @@ cat > "$DAEMON_PLIST" <<EOF
 </plist>
 EOF
 
-# Unload first if already loaded, then load fresh
-launchctl bootout "gui/$(id -u)/$DAEMON_LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST" 2>/dev/null || \
-    launchctl load -w "$DAEMON_PLIST"
-
+install_agent "$DAEMON_LABEL" "$DAEMON_PLIST"
 green "  Daemon agent installed and started."
+
+# ── Hardware Daemon: launchd user agent ──────────────────────────────
+bold "Installing hardware daemon launch agent..."
+
+cat > "$HARDWARE_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$HARDWARE_LABEL</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>$HARDWARE_BIN</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>$LOG_DIR/hardware-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>$LOG_DIR/hardware-stderr.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
+EOF
+
+install_agent "$HARDWARE_LABEL" "$HARDWARE_PLIST"
+green "  Hardware daemon agent installed and started."
 
 # ── GUI: launchd user agent ──────────────────────────────────────────
 bold "Installing GUI launch agent..."
 
-# Launch the .app bundle so macOS picks up the icon and Info.plist
 cat > "$GUI_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -231,18 +287,17 @@ cat > "$GUI_PLIST" <<EOF
 </plist>
 EOF
 
-launchctl bootout "gui/$(id -u)/$GUI_LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$GUI_PLIST" 2>/dev/null || \
-    launchctl load -w "$GUI_PLIST"
-
+install_agent "$GUI_LABEL" "$GUI_PLIST"
 green "  GUI agent installed and started."
 
 # ── Done ──────────────────────────────────────────────────────────────
 echo ""
 green "VolMon registered successfully!"
 echo ""
-echo "  App bundle:   $APP_BUNDLE"
-echo "  Daemon logs:  $LOG_DIR/daemon-*.log"
-echo "  GUI logs:     $LOG_DIR/gui-*.log"
-echo "  Unregister:   $0 --unregister"
+echo "  App bundles:    $APP_BUNDLE"
+echo "                  $HARDWARE_APP_BUNDLE"
+echo "  Daemon logs:    $LOG_DIR/daemon-*.log"
+echo "  Hardware logs:  $LOG_DIR/hardware-*.log"
+echo "  GUI logs:       $LOG_DIR/gui-*.log"
+echo "  Unregister:     $0 --unregister"
 echo ""

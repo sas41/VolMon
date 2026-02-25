@@ -2,7 +2,7 @@
 #
 # VolMon cross-platform publish script
 #
-# Builds self-contained, single-file binaries for all three OS targets
+# Builds self-contained, single-file binaries for all five projects
 # and places them under ./publish/<RID>/, along with the appropriate
 # registration script for that platform.
 #
@@ -11,16 +11,28 @@
 #     linux-x64/
 #       VolMon.Daemon
 #       VolMon.GUI
+#       VolMon.Hardware
+#       VolMon.HardwareGUI
+#       Layouts/
+#         VolMon_Layout_BeacnMix_*.json
 #       volmon.png
 #       register.sh
 #     win-x64/
 #       VolMon.Daemon.exe
 #       VolMon.GUI.exe
+#       VolMon.Hardware.exe
+#       VolMon.HardwareGUI.exe
+#       Layouts/
+#         VolMon_Layout_BeacnMix_*.json
 #       volmon.ico
 #       register.ps1
 #     osx-x64/
 #       VolMon.Daemon
 #       VolMon.GUI
+#       VolMon.Hardware
+#       VolMon.HardwareGUI
+#       Layouts/
+#         VolMon_Layout_BeacnMix_*.json
 #       volmon.png
 #       register.sh
 #
@@ -40,7 +52,7 @@ ASSETS_DIR="$PROJECT_ROOT/assets"
 CONFIG="Release"
 
 ALL_RIDS=(linux-x64 win-x64 osx-x64)
-PROJECTS=(VolMon.Daemon VolMon.GUI)
+PROJECTS=(VolMon.Daemon VolMon.GUI VolMon.Hardware VolMon.HardwareGUI)
 
 # ── Colors ────────────────────────────────────────────────────────────
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }

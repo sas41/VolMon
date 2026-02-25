@@ -13,10 +13,10 @@ builder.Logging.AddSimpleConsole(options =>
     options.SingleLine = true;
 });
 
-// Register the Beacn Mix controller
-builder.Services.AddSingleton<IHardwareController, BeacnMixController>();
+// Register device drivers — add new drivers here as hardware support is added
+builder.Services.AddSingleton<IDeviceDriver, BeacnMixDriver>();
 
-// Register the bridge service that connects hardware events to the daemon via IPC
+// Register the bridge service that manages all device sessions
 builder.Services.AddHostedService<HardwareBridgeService>();
 
 var host = builder.Build();

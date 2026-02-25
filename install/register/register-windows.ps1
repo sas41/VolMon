@@ -4,15 +4,16 @@
     VolMon registration script for Windows.
 
 .DESCRIPTION
-    Registers the daemon as a Windows Task Scheduler task that runs at
-    logon (hidden, auto-restart on failure) and places a shortcut to
-    the GUI in the user's Startup folder so it launches on login.
+    Registers the daemon and hardware daemon as Windows Task Scheduler
+    tasks that run at logon (hidden, auto-restart on failure) and places
+    shortcuts to both GUIs in the user's Startup folder so they launch
+    on login.
 
     Run from inside the publish\win-x64\ folder (or wherever the
-    VolMon.Daemon.exe and VolMon.GUI.exe binaries are located).
+    VolMon binaries are located).
 
 .PARAMETER Unregister
-    Remove the scheduled task and startup shortcut.
+    Remove the scheduled tasks and startup shortcuts.
 
 .EXAMPLE
     .\register.ps1
@@ -25,34 +26,40 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptDir    = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$DaemonExe    = Join-Path $ScriptDir 'VolMon.Daemon.exe'
-$GuiExe       = Join-Path $ScriptDir 'VolMon.GUI.exe'
-$IconFile     = Join-Path $ScriptDir 'volmon.ico'
-$TaskName     = 'VolMon Daemon'
-$StartupDir   = [Environment]::GetFolderPath('Startup')
-$ShortcutPath = Join-Path $StartupDir 'VolMon GUI.lnk'
+$ScriptDir        = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$DaemonExe        = Join-Path $ScriptDir 'VolMon.Daemon.exe'
+$GuiExe           = Join-Path $ScriptDir 'VolMon.GUI.exe'
+$HardwareExe      = Join-Path $ScriptDir 'VolMon.Hardware.exe'
+$HardwareGuiExe   = Join-Path $ScriptDir 'VolMon.HardwareGUI.exe'
+$IconFile         = Join-Path $ScriptDir 'volmon.ico'
+$TaskName         = 'VolMon Daemon'
+$HardwareTaskName = 'VolMon Hardware Daemon'
+$StartupDir       = [Environment]::GetFolderPath('Startup')
+$GuiShortcut      = Join-Path $StartupDir 'VolMon GUI.lnk'
+$HwGuiShortcut    = Join-Path $StartupDir 'VolMon Hardware Manager.lnk'
 
 # ── Unregister ────────────────────────────────────────────────────────
 if ($Unregister) {
     Write-Host 'Unregistering VolMon...' -ForegroundColor Cyan
 
-    # Remove scheduled task
-    $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($existing) {
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        Write-Host '  Daemon task removed.' -ForegroundColor Green
-    } else {
-        Write-Host '  Daemon task not found (already removed).' -ForegroundColor Yellow
+    # Remove scheduled tasks
+    foreach ($name in @($TaskName, $HardwareTaskName)) {
+        $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if ($existing) {
+            Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false
+            Write-Host "  Task '$name' removed." -ForegroundColor Green
+        } else {
+            Write-Host "  Task '$name' not found (already removed)." -ForegroundColor Yellow
+        }
     }
 
-    # Remove startup shortcut
-    if (Test-Path $ShortcutPath) {
-        Remove-Item $ShortcutPath -Force
-        Write-Host '  GUI startup shortcut removed.' -ForegroundColor Green
-    } else {
-        Write-Host '  GUI shortcut not found (already removed).' -ForegroundColor Yellow
+    # Remove startup shortcuts
+    foreach ($path in @($GuiShortcut, $HwGuiShortcut)) {
+        if (Test-Path $path) {
+            Remove-Item $path -Force
+            Write-Host "  Shortcut removed: $(Split-Path -Leaf $path)" -ForegroundColor Green
+        }
     }
 
     Write-Host "`nVolMon unregistered." -ForegroundColor Green
@@ -60,7 +67,7 @@ if ($Unregister) {
 }
 
 # ── Validate binaries ────────────────────────────────────────────────
-foreach ($bin in @($DaemonExe, $GuiExe)) {
+foreach ($bin in @($DaemonExe, $GuiExe, $HardwareExe, $HardwareGuiExe)) {
     if (-not (Test-Path $bin)) {
         Write-Host "Error: $(Split-Path -Leaf $bin) not found in $ScriptDir" -ForegroundColor Red
         Write-Host 'Run this script from the publish\win-x64\ folder.' -ForegroundColor Red
@@ -68,62 +75,93 @@ foreach ($bin in @($DaemonExe, $GuiExe)) {
     }
 }
 
-# ── Daemon: Task Scheduler ───────────────────────────────────────────
-Write-Host 'Installing daemon scheduled task...' -ForegroundColor Cyan
+# ── Helper: register a scheduled task ────────────────────────────────
+function Register-DaemonTask {
+    param(
+        [string]$Name,
+        [string]$ExePath,
+        [string]$Description
+    )
 
-# Remove old task if it exists
-$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($existing) {
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    # Remove old task if it exists
+    $existing = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+    if ($existing) {
+        Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $Name -Confirm:$false
+    }
+
+    $action  = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $ScriptDir
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -Hidden
+
+    Register-ScheduledTask `
+        -TaskName $Name `
+        -Action $action `
+        -Trigger $trigger `
+        -Settings $settings `
+        -Description $Description `
+        -RunLevel Limited | Out-Null
+
+    Start-ScheduledTask -TaskName $Name
+    Write-Host "  Task '$Name' installed and started." -ForegroundColor Green
 }
 
-$action  = New-ScheduledTaskAction -Execute $DaemonExe -WorkingDirectory $ScriptDir
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$settings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -ExecutionTimeLimit ([TimeSpan]::Zero) `
-    -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1) `
-    -Hidden
+# ── Helper: create a startup shortcut ────────────────────────────────
+function New-StartupShortcut {
+    param(
+        [string]$ShortcutPath,
+        [string]$TargetExe,
+        [string]$Description
+    )
 
-Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Description 'VolMon Audio Group Volume Daemon' `
-    -RunLevel Limited | Out-Null
+    $shell    = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($ShortcutPath)
+    $shortcut.TargetPath       = $TargetExe
+    $shortcut.WorkingDirectory = $ScriptDir
+    $shortcut.Description      = $Description
+    $shortcut.WindowStyle      = 1  # Normal window
+    if (Test-Path $IconFile) {
+        $shortcut.IconLocation = "$IconFile,0"
+    }
+    $shortcut.Save()
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
+}
 
-# Start the task now
-Start-ScheduledTask -TaskName $TaskName
-Write-Host '  Daemon task installed and started.' -ForegroundColor Green
+# ── Daemon: Task Scheduler ───────────────────────────────────────────
+Write-Host 'Installing daemon scheduled task...' -ForegroundColor Cyan
+Register-DaemonTask -Name $TaskName -ExePath $DaemonExe `
+    -Description 'VolMon Audio Group Volume Daemon'
+
+# ── Hardware Daemon: Task Scheduler ──────────────────────────────────
+Write-Host 'Installing hardware daemon scheduled task...' -ForegroundColor Cyan
+Register-DaemonTask -Name $HardwareTaskName -ExePath $HardwareExe `
+    -Description 'VolMon Hardware Daemon'
 
 # ── GUI: Startup folder shortcut ─────────────────────────────────────
 Write-Host 'Installing GUI startup shortcut...' -ForegroundColor Cyan
-
-$shell    = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($ShortcutPath)
-$shortcut.TargetPath       = $GuiExe
-$shortcut.WorkingDirectory = $ScriptDir
-$shortcut.Description      = 'VolMon Volume Monitoring and Control'
-$shortcut.WindowStyle      = 1  # Normal window
-if (Test-Path $IconFile) {
-    $shortcut.IconLocation = "$IconFile,0"
-}
-$shortcut.Save()
-
-# Release COM object
-[System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
-
+New-StartupShortcut -ShortcutPath $GuiShortcut -TargetExe $GuiExe `
+    -Description 'VolMon Volume Monitoring and Control'
 Write-Host '  GUI will start automatically on next login.' -ForegroundColor Green
+
+# ── Hardware GUI: Startup folder shortcut ────────────────────────────
+Write-Host 'Installing Hardware GUI startup shortcut...' -ForegroundColor Cyan
+New-StartupShortcut -ShortcutPath $HwGuiShortcut -TargetExe $HardwareGuiExe `
+    -Description 'VolMon Hardware Device Manager'
+Write-Host '  Hardware GUI will start automatically on next login.' -ForegroundColor Green
 
 # ── Done ──────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host 'VolMon registered successfully!' -ForegroundColor Green
 Write-Host ''
-Write-Host "  Daemon task:  Get-ScheduledTask -TaskName '$TaskName'"
-Write-Host "  Start GUI:    $GuiExe"
-Write-Host "  Unregister:   .\register.ps1 -Unregister"
+Write-Host "  Daemon task:    Get-ScheduledTask -TaskName '$TaskName'"
+Write-Host "  Hardware task:  Get-ScheduledTask -TaskName '$HardwareTaskName'"
+Write-Host "  Start GUI:      $GuiExe"
+Write-Host "  Hardware GUI:   $HardwareGuiExe"
+Write-Host "  Unregister:     .\register.ps1 -Unregister"
 Write-Host ''

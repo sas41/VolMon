@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\VolMon.Core\VolMon.Core.csproj" />
+    <ProjectReference Include="..\VolMon.Hardware.Models\VolMon.Hardware.Models.csproj" />
   </ItemGroup>
 
   <ItemGroup>

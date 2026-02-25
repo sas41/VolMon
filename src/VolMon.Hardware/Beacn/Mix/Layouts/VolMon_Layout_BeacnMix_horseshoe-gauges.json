@@ -97,7 +97,9 @@
           "color": "#888888",
           "secondaryColor": "#DD3030",
           "fontSize": 20,
-          "align": "center"
+          "align": "center",
+          "overflow": "truncate",
+          "separatorColor": "{group.color}"
         }
       ]
     }

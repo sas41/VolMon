@@ -55,7 +55,9 @@
           "color": "#666666",
           "secondaryColor": "#555555",
           "fontSize": 13,
-          "align": "left"
+          "align": "left",
+          "overflow": "truncate",
+          "separatorColor": "{group.color}"
         }
       ]
     }

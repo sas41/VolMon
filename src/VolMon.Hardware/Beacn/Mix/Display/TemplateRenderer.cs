@@ -369,14 +369,35 @@ internal static class TemplateRenderer
         var lineHeight = font.Size * 1.3f;
         var drawY = y + font.Size;
 
+        var truncate = slot.Overflow == TextOverflow.Truncate;
+
+        // Optional separator line between entries
+        var hasSeparator = !string.IsNullOrEmpty(slot.SeparatorColor);
+        SKPaint? separatorPaint = null;
+        if (hasSeparator)
+        {
+            var sepColor = SKColor.TryParse(slot.SeparatorColor, out var sc) ? sc : new SKColor(0x33, 0x33, 0x33);
+            separatorPaint = new SKPaint { Color = sepColor, IsAntialias = true, StrokeWidth = 1 };
+        }
+
+        var lineIndex = 0; // tracks total lines rendered (for separator logic)
+
         // Render primary text
         if (!string.IsNullOrEmpty(text))
         {
-            var primaryLines = WrapText(text, font, maxWidth);
+            var primaryLines = truncate
+                ? TruncateLines(text, font, maxWidth)
+                : WrapText(text, font, maxWidth);
             foreach (var line in primaryLines)
             {
+                if (hasSeparator && lineIndex > 0)
+                {
+                    var sepY = drawY - lineHeight + (lineHeight - font.Size) / 2;
+                    canvas.DrawLine(x, sepY, x + w, sepY, separatorPaint!);
+                }
                 canvas.DrawText(line, drawX, drawY, textAlign, font, paint);
                 drawY += lineHeight;
+                lineIndex++;
             }
         }
 
@@ -388,13 +409,23 @@ internal static class TemplateRenderer
             secondaryColor = BindingResolver.WithOpacity(secondaryColor, slot.Opacity);
             paint.Color = secondaryColor;
 
-            var secondaryLines = WrapText(secondaryText, font, maxWidth);
+            var secondaryLines = truncate
+                ? TruncateLines(secondaryText, font, maxWidth)
+                : WrapText(secondaryText, font, maxWidth);
             foreach (var line in secondaryLines)
             {
+                if (hasSeparator && lineIndex > 0)
+                {
+                    var sepY = drawY - lineHeight + (lineHeight - font.Size) / 2;
+                    canvas.DrawLine(x, sepY, x + w, sepY, separatorPaint!);
+                }
                 canvas.DrawText(line, drawX, drawY, textAlign, font, paint);
                 drawY += lineHeight;
+                lineIndex++;
             }
         }
+
+        separatorPaint?.Dispose();
     }
 
     /// <summary>
@@ -487,6 +518,24 @@ internal static class TemplateRenderer
         }
 
         return ellipsis;
+    }
+
+    /// <summary>
+    /// Split text on newlines and truncate each line individually with ellipsis
+    /// if it exceeds maxWidth. No word-wrapping — each logical line stays on one line.
+    /// </summary>
+    private static List<string> TruncateLines(string text, SKFont font, float maxWidth)
+    {
+        var result = new List<string>();
+        var lines = text.Split('\n');
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            result.Add(font.MeasureText(trimmed) > maxWidth
+                ? TruncateWithEllipsis(trimmed, font, maxWidth)
+                : trimmed);
+        }
+        return result;
     }
 
     private static void DrawBar(SKCanvas canvas, DisplaySlot slot,

@@ -222,6 +222,21 @@ public sealed class DisplaySlot
     /// <summary>Text alignment within the slot: left, center, right.</summary>
     public HAlign Align { get; set; } = HAlign.Center;
 
+    /// <summary>
+    /// How to handle text that exceeds the slot width.
+    /// <see cref="TextOverflow.Wrap"/> (default) word-wraps onto multiple lines.
+    /// <see cref="TextOverflow.Truncate"/> clips each line with an ellipsis ("...").
+    /// </summary>
+    public TextOverflow Overflow { get; set; } = TextOverflow.Wrap;
+
+    /// <summary>
+    /// Optional separator line color drawn between each text entry (line).
+    /// When set, a thin horizontal line in this color is drawn between consecutive
+    /// lines of text (both primary and secondary). If null or empty, no separators
+    /// are drawn.
+    /// </summary>
+    public string? SeparatorColor { get; set; }
+
     // ── Bar properties ──────────────────────────────────────────────
 
     /// <summary>Value for bars (0-100 or binding like "{group.volume}").</summary>
@@ -319,4 +334,13 @@ public enum BarDirection
 {
     Up,
     Right
+}
+
+public enum TextOverflow
+{
+    /// <summary>Word-wrap text onto multiple lines (default).</summary>
+    Wrap,
+
+    /// <summary>Truncate each line with ellipsis ("...") if it exceeds the slot width.</summary>
+    Truncate
 }

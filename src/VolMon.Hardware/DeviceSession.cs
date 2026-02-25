@@ -366,11 +366,29 @@ internal sealed class DeviceSession : IAsyncDisposable
         var active = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var configured = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Add all configured programs and devices
+        // Build a lookup from raw device name → friendly description so we can
+        // display descriptions instead of opaque PulseAudio/PipeWire identifiers.
+        Dictionary<string, string>? deviceDisplayNames = null;
+        if (_lastDevices is not null)
+        {
+            deviceDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var dev in _lastDevices)
+            {
+                if (!string.IsNullOrEmpty(dev.Description))
+                    deviceDisplayNames[dev.Name] = dev.Description;
+            }
+        }
+
+        // Add all configured programs and devices (resolve device IDs to descriptions)
         foreach (var prog in group.Programs)
             configured.Add(prog);
         foreach (var dev in group.Devices)
-            configured.Add(dev);
+        {
+            var displayName = deviceDisplayNames is not null
+                && deviceDisplayNames.TryGetValue(dev, out var desc)
+                ? desc : dev;
+            configured.Add(displayName);
+        }
 
         // Find active members from process snapshot.
         // A process is active if:

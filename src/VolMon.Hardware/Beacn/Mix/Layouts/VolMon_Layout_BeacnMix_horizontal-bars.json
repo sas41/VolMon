@@ -3,6 +3,7 @@
   "height": 480,
   "background": "#1E1E1E",
   "jpegQuality": 50,
+  "fontFamily": "Fonts/Montserrat-Regular.ttf",
   "slots": [
     {
       "repeat": "0-3",
@@ -19,15 +20,6 @@
           "x": "0", "y": "0", "w": "6", "h": "120",
           "fill": "{group.color}",
           "radius": 0
-        },
-        {
-          "type": "text",
-          "x": "20", "y": "12", "w": "300",
-          "text": "{group.name}",
-          "color": "#FFFFFF",
-          "fontSize": 24,
-          "fontWeight": "bold",
-          "align": "left"
         },
         {
           "type": "text",
@@ -57,10 +49,12 @@
         },
         {
           "type": "text",
-          "x": "20", "y": "88", "w": "300",
-          "text": "Dial {group.dial}",
-          "color": "#555555",
-          "fontSize": 14,
+          "x": "20", "y": "88", "w": "760",
+          "text": "{group.activeMembers}",
+          "secondaryText": "{group.inactiveMembers}",
+          "color": "#666666",
+          "secondaryColor": "#555555",
+          "fontSize": 13,
           "align": "left"
         }
       ]

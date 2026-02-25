@@ -7,13 +7,17 @@ namespace VolMon.Hardware.Beacn.Mix.Display;
 /// Resolves data bindings in layout slot properties.
 ///
 /// Binding syntax:
-///   {group.name}       -> group name string
-///   {group.volume}     -> volume integer (0-100)
-///   {group.volume}%    -> "75%"
-///   {group.muted}      -> "True" / "False"
-///   {group.color}      -> hex color string
-///   {group.index}      -> 0-based group index
-///   {group.dial}       -> 1-based dial number
+///   {group.name}              -> group name string
+///   {group.volume}            -> volume integer (0-100)
+///   {group.volume}%           -> "75%"
+///   {group.muted}             -> "True" / "False"
+///   {group.color}             -> hex color string
+///   {group.index}             -> 0-based group index
+///   {group.dial}              -> 1-based dial number
+///   {group.activeMembers}     -> newline-separated active member names
+///   {group.inactiveMembers}   -> newline-separated inactive member names
+///   {group.hasActiveMembers}  -> "True" if any members are active
+///   {group.hasInactiveMembers} -> "True" if any members are inactive
 ///
 /// Plain strings without {} are returned as-is.
 /// </summary>
@@ -49,6 +53,10 @@ internal static partial class BindingResolver
                 "color" => g.Color ?? "#FFFFFF",
                 "index" => idx.ToString(),
                 "dial" => (idx + 1).ToString(),
+                "activeMembers" => FormatMembers(g.ActiveMembers),
+                "inactiveMembers" => FormatMembers(g.InactiveMembers),
+                "hasActiveMembers" => (g.ActiveMembers.Length > 0).ToString(),
+                "hasInactiveMembers" => (g.InactiveMembers.Length > 0).ToString(),
                 _ => match.Value
             };
         });
@@ -111,4 +119,11 @@ internal static partial class BindingResolver
         var alpha = (byte)(color.Alpha * Math.Clamp(opacity, 0f, 1f));
         return new SKColor(color.Red, color.Green, color.Blue, alpha);
     }
+
+    /// <summary>
+    /// Format a list of member names with one entry per line for display.
+    /// </summary>
+    private static string FormatMembers(string[]? members) =>
+        members is null || members.Length == 0 ? "" : string.Join("\n", members);
+
 }

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using SkiaSharp;
 
 namespace VolMon.Hardware.Beacn.Mix.Display;
@@ -6,6 +7,9 @@ namespace VolMon.Hardware.Beacn.Mix.Display;
 /// <summary>
 /// Renders a DisplayLayout template to a JPEG byte array by walking the slot tree,
 /// resolving data bindings, and drawing each element with SkiaSharp.
+///
+/// Supports partial updates by comparing the new frame against a cached previous frame
+/// and returning only the changed region as JPEG data.
 /// </summary>
 internal static class TemplateRenderer
 {
@@ -17,11 +21,199 @@ internal static class TemplateRenderer
     /// </summary>
     private static readonly ConcurrentDictionary<string, SKImage?> ImageCache = new();
 
+    /// <summary>
+    /// Cache loaded typefaces by resolved path or family name so we don't hit disk every frame.
+    /// Keys are either absolute file paths (for custom font files) or family names (for system fonts).
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, SKTypeface?> TypefaceCache = new();
+
+    /// <summary>
+    /// Result of a render operation, potentially containing a partial update.
+    /// </summary>
+    public readonly struct RenderResult
+    {
+        /// <summary>JPEG data for the updated region (or full frame).</summary>
+        public byte[] JpegData { get; init; }
+
+        /// <summary>X position to place the JPEG on the device display.</summary>
+        public int X { get; init; }
+
+        /// <summary>Y position to place the JPEG on the device display.</summary>
+        public int Y { get; init; }
+
+        /// <summary>Whether this is a partial update (true) or a full frame (false).</summary>
+        public bool IsPartial { get; init; }
+    }
+
+    /// <summary>
+    /// Render a full frame without any diffing (used for initial render or layout changes).
+    /// </summary>
     public static byte[] Render(DisplayLayout layout, ReadOnlySpan<GroupDisplayState> groups)
     {
         using var surface = SKSurface.Create(new SKImageInfo(layout.Width, layout.Height));
         var canvas = surface.Canvas;
 
+        RenderToCanvas(canvas, layout, groups);
+
+        using var image = surface.Snapshot();
+        using var data = image.Encode(SKEncodedImageFormat.Jpeg, Math.Clamp(layout.JpegQuality, 1, 100));
+        return data.ToArray();
+    }
+
+    /// <summary>
+    /// Render with dirty-region detection. Compares the new frame against a cached previous
+    /// frame and returns only the changed region as JPEG data when possible.
+    /// </summary>
+    /// <param name="layout">The display layout to render.</param>
+    /// <param name="groups">Current group display states.</param>
+    /// <param name="previousPixels">
+    /// Cached pixel data from the previous frame (BGRA, layout.Width * layout.Height * 4 bytes).
+    /// Pass null to force a full render. Will be updated in-place with the new frame's pixels.
+    /// </param>
+    /// <returns>
+    /// A RenderResult with JPEG data and positioning, or null if the frame is identical
+    /// to the previous one.
+    /// </returns>
+    public static RenderResult? RenderWithDiff(
+        DisplayLayout layout,
+        ReadOnlySpan<GroupDisplayState> groups,
+        ref byte[]? previousPixels)
+    {
+        var width = layout.Width;
+        var height = layout.Height;
+        var pixelByteCount = width * height * 4; // BGRA
+
+        using var surface = SKSurface.Create(new SKImageInfo(width, height));
+        var canvas = surface.Canvas;
+
+        RenderToCanvas(canvas, layout, groups);
+
+        // Read pixel data from the rendered surface
+        using var pixmap = surface.PeekPixels();
+        var currentPixels = new byte[pixelByteCount];
+        Marshal.Copy(pixmap.GetPixels(), currentPixels, 0, pixelByteCount);
+
+        // First render or layout change — no previous frame to compare against
+        if (previousPixels is null || previousPixels.Length != pixelByteCount)
+        {
+            previousPixels = currentPixels;
+
+            using var image = surface.Snapshot();
+            using var data = image.Encode(SKEncodedImageFormat.Jpeg, Math.Clamp(layout.JpegQuality, 1, 100));
+            return new RenderResult
+            {
+                JpegData = data.ToArray(),
+                X = 0,
+                Y = 0,
+                IsPartial = false
+            };
+        }
+
+        // Compare pixels to find the dirty bounding rectangle
+        var dirty = FindDirtyRect(previousPixels, currentPixels, width, height);
+
+        if (dirty is null)
+        {
+            // Frames are identical — nothing to send
+            return null;
+        }
+
+        var (dirtyX, dirtyY, dirtyW, dirtyH) = dirty.Value;
+
+        // Update the cached pixels for next comparison
+        Array.Copy(currentPixels, previousPixels, pixelByteCount);
+
+        // If the dirty region is more than 60% of the total area, just send a full frame
+        // (partial JPEG overhead + decode latency makes it not worth it for large regions)
+        var dirtyArea = (long)dirtyW * dirtyH;
+        var totalArea = (long)width * height;
+        if (dirtyArea * 100 / totalArea > 60)
+        {
+            using var image = surface.Snapshot();
+            using var data = image.Encode(SKEncodedImageFormat.Jpeg, Math.Clamp(layout.JpegQuality, 1, 100));
+            return new RenderResult
+            {
+                JpegData = data.ToArray(),
+                X = 0,
+                Y = 0,
+                IsPartial = false
+            };
+        }
+
+        // Extract and encode only the dirty region
+        var regionJpeg = ExtractRegionJpeg(surface, dirtyX, dirtyY, dirtyW, dirtyH, layout.JpegQuality);
+
+        return new RenderResult
+        {
+            JpegData = regionJpeg,
+            X = dirtyX,
+            Y = dirtyY,
+            IsPartial = true
+        };
+    }
+
+    /// <summary>
+    /// Find the minimal bounding rectangle of pixels that differ between two frames.
+    /// Returns null if the frames are identical.
+    /// </summary>
+    private static (int X, int Y, int W, int H)? FindDirtyRect(
+        byte[] previous, byte[] current, int width, int height)
+    {
+        var stride = width * 4;
+        int minX = width, minY = height, maxX = -1, maxY = -1;
+
+        // Compare as 32-bit integers for speed (each pixel is 4 bytes BGRA)
+        var prevSpan = MemoryMarshal.Cast<byte, uint>(previous.AsSpan());
+        var currSpan = MemoryMarshal.Cast<byte, uint>(current.AsSpan());
+
+        for (var y = 0; y < height; y++)
+        {
+            var rowOffset = y * width;
+            for (var x = 0; x < width; x++)
+            {
+                if (prevSpan[rowOffset + x] != currSpan[rowOffset + x])
+                {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+
+        if (maxX < 0)
+            return null; // Identical
+
+        var dirtyW = maxX - minX + 1;
+        var dirtyH = maxY - minY + 1;
+
+        return (minX, minY, dirtyW, dirtyH);
+    }
+
+    /// <summary>
+    /// Extract a rectangular region from a surface and encode it as JPEG.
+    /// </summary>
+    private static byte[] ExtractRegionJpeg(SKSurface sourceSurface, int x, int y, int w, int h, int quality)
+    {
+        using var regionSurface = SKSurface.Create(new SKImageInfo(w, h));
+        var canvas = regionSurface.Canvas;
+
+        // Draw the source region onto the smaller surface
+        using var sourceImage = sourceSurface.Snapshot();
+        var srcRect = new SKRect(x, y, x + w, y + h);
+        var dstRect = new SKRect(0, 0, w, h);
+        canvas.DrawImage(sourceImage, srcRect, dstRect);
+
+        using var image = regionSurface.Snapshot();
+        using var data = image.Encode(SKEncodedImageFormat.Jpeg, Math.Clamp(quality, 1, 100));
+        return data.ToArray();
+    }
+
+    /// <summary>
+    /// Render the layout to a canvas (shared logic between full and diff renders).
+    /// </summary>
+    private static void RenderToCanvas(SKCanvas canvas, DisplayLayout layout, ReadOnlySpan<GroupDisplayState> groups)
+    {
         // Background color
         var bg = SKColor.TryParse(layout.Background, out var bgColor) ? bgColor : new SKColor(0x2B, 0x2B, 0x2B);
         canvas.Clear(bg);
@@ -39,17 +231,14 @@ internal static class TemplateRenderer
         }
 
         // Draw each slot
+        var defaultFontFamily = layout.FontFamily;
         foreach (var slot in layout.Slots)
         {
-            DrawSlot(canvas, slot, groups);
+            DrawSlot(canvas, slot, groups, defaultFontFamily);
         }
-
-        using var image = surface.Snapshot();
-        using var data = image.Encode(SKEncodedImageFormat.Jpeg, Math.Clamp(layout.JpegQuality, 1, 100));
-        return data.ToArray();
     }
 
-    private static void DrawSlot(SKCanvas canvas, DisplaySlot slot, ReadOnlySpan<GroupDisplayState> groups)
+    private static void DrawSlot(SKCanvas canvas, DisplaySlot slot, ReadOnlySpan<GroupDisplayState> groups, string? defaultFontFamily)
     {
         // Handle repeat
         if (slot.Repeat is not null)
@@ -69,13 +258,13 @@ internal static class TemplateRenderer
 
                 // Draw this slot's own visuals (if it has a type other than just a container)
                 if (slot.Type != 0 || slot.Children is null)
-                    DrawSingleSlot(canvas, slot, groups[i], i);
+                    DrawSingleSlot(canvas, slot, groups[i], i, defaultFontFamily);
 
                 // Draw children
                 if (slot.Children is not null)
                 {
                     foreach (var child in slot.Children)
-                        DrawSingleSlot(canvas, child, groups[i], i);
+                        DrawSingleSlot(canvas, child, groups[i], i, defaultFontFamily);
                 }
 
                 canvas.Restore();
@@ -85,10 +274,10 @@ internal static class TemplateRenderer
 
         // Non-repeating: draw with group 0 context (or empty)
         var g = groups.Length > 0 ? groups[0] : default;
-        DrawSingleSlot(canvas, slot, g, 0);
+        DrawSingleSlot(canvas, slot, g, 0, defaultFontFamily);
     }
 
-    private static void DrawSingleSlot(SKCanvas canvas, DisplaySlot slot, in GroupDisplayState group, int groupIndex)
+    private static void DrawSingleSlot(SKCanvas canvas, DisplaySlot slot, in GroupDisplayState group, int groupIndex, string? defaultFontFamily)
     {
         var x = BindingResolver.ResolveFloat(slot.X, group, groupIndex);
         var y = BindingResolver.ResolveFloat(slot.Y, group, groupIndex);
@@ -101,13 +290,13 @@ internal static class TemplateRenderer
                 DrawRect(canvas, slot, group, groupIndex, x, y, w, h);
                 break;
             case SlotType.Text:
-                DrawText(canvas, slot, group, groupIndex, x, y, w);
+                DrawText(canvas, slot, group, groupIndex, x, y, w, defaultFontFamily);
                 break;
             case SlotType.Bar:
                 DrawBar(canvas, slot, group, groupIndex, x, y, w, h);
                 break;
             case SlotType.Checkbox:
-                DrawCheckbox(canvas, slot, group, groupIndex, x, y);
+                DrawCheckbox(canvas, slot, group, groupIndex, x, y, defaultFontFamily);
                 break;
             case SlotType.Line:
                 DrawLine(canvas, slot, group, groupIndex, x, y, w, h);
@@ -143,16 +332,18 @@ internal static class TemplateRenderer
 
     private static void DrawText(SKCanvas canvas, DisplaySlot slot,
         in GroupDisplayState group, int groupIndex,
-        float x, float y, float w)
+        float x, float y, float w, string? defaultFontFamily)
     {
         var text = BindingResolver.ResolveString(slot.Text, group, groupIndex);
-        if (string.IsNullOrEmpty(text)) return;
+        var secondaryText = BindingResolver.ResolveString(slot.SecondaryText, group, groupIndex);
+        if (string.IsNullOrEmpty(text) && string.IsNullOrEmpty(secondaryText)) return;
 
         var color = BindingResolver.ResolveColor(slot.Color, group, groupIndex, DefaultText);
         color = BindingResolver.WithOpacity(color, slot.Opacity);
 
         var fontStyle = slot.FontWeight == FontWeight.Bold ? SKFontStyle.Bold : SKFontStyle.Normal;
-        using var font = new SKFont(SKTypeface.FromFamilyName("sans-serif", fontStyle), slot.FontSize);
+        var typeface = ResolveTypeface(slot.FontFamily, defaultFontFamily, fontStyle);
+        using var font = new SKFont(typeface, slot.FontSize);
         using var paint = new SKPaint { Color = color, IsAntialias = true };
 
         var textAlign = slot.Align switch
@@ -170,10 +361,132 @@ internal static class TemplateRenderer
             _ => x
         };
 
-        // y is the top of the text area; SkiaSharp draws from baseline
+        // If the text contains commas (e.g. member lists) or the text is wider than
+        // the slot width, wrap it onto multiple lines. When w > 0 the slot has a
+        // defined width we can clip/wrap to.
+        var maxWidth = w > 0 ? w : float.MaxValue;
+
+        var lineHeight = font.Size * 1.3f;
         var drawY = y + font.Size;
 
-        canvas.DrawText(text, drawX, drawY, textAlign, font, paint);
+        // Render primary text
+        if (!string.IsNullOrEmpty(text))
+        {
+            var primaryLines = WrapText(text, font, maxWidth);
+            foreach (var line in primaryLines)
+            {
+                canvas.DrawText(line, drawX, drawY, textAlign, font, paint);
+                drawY += lineHeight;
+            }
+        }
+
+        // Render secondary text (if any) immediately after, in secondary color
+        if (!string.IsNullOrEmpty(secondaryText))
+        {
+            var secondaryColor = BindingResolver.ResolveColor(
+                slot.SecondaryColor, group, groupIndex, color);
+            secondaryColor = BindingResolver.WithOpacity(secondaryColor, slot.Opacity);
+            paint.Color = secondaryColor;
+
+            var secondaryLines = WrapText(secondaryText, font, maxWidth);
+            foreach (var line in secondaryLines)
+            {
+                canvas.DrawText(line, drawX, drawY, textAlign, font, paint);
+                drawY += lineHeight;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Wrap text into lines that fit within maxWidth pixels.
+    /// Explicit newlines (\n) always force a line break. Within each logical line,
+    /// text is word-wrapped to fit within maxWidth, and individual words that still
+    /// exceed the width are truncated with ellipsis.
+    /// </summary>
+    private static List<string> WrapText(string text, SKFont font, float maxWidth)
+    {
+        // Fast path: no wrapping needed (single line, fits)
+        if (!text.Contains('\n') && font.MeasureText(text) <= maxWidth)
+            return [text];
+
+        var result = new List<string>();
+
+        // Split on explicit newlines first — each is a separate logical line
+        var logicalLines = text.Split('\n');
+
+        foreach (var logicalLine in logicalLines)
+        {
+            var trimmed = logicalLine.Trim();
+            if (trimmed.Length == 0)
+            {
+                result.Add("");
+                continue;
+            }
+
+            // If the logical line fits, add it directly
+            if (font.MeasureText(trimmed) <= maxWidth)
+            {
+                result.Add(trimmed);
+                continue;
+            }
+
+            // Word-wrap this logical line
+            var words = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var currentLine = "";
+
+            foreach (var word in words)
+            {
+                var candidate = currentLine.Length == 0
+                    ? word
+                    : currentLine + " " + word;
+
+                if (font.MeasureText(candidate) <= maxWidth)
+                {
+                    currentLine = candidate;
+                }
+                else
+                {
+                    if (currentLine.Length > 0)
+                    {
+                        result.Add(currentLine);
+                        currentLine = word;
+                    }
+                    else
+                    {
+                        // Single word exceeds width — truncate with ellipsis
+                        currentLine = TruncateWithEllipsis(word, font, maxWidth);
+                    }
+                }
+            }
+
+            if (currentLine.Length > 0)
+            {
+                if (font.MeasureText(currentLine) > maxWidth)
+                    currentLine = TruncateWithEllipsis(currentLine, font, maxWidth);
+                result.Add(currentLine);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Truncate a string to fit within maxWidth, appending "..." if truncated.
+    /// </summary>
+    private static string TruncateWithEllipsis(string text, SKFont font, float maxWidth)
+    {
+        const string ellipsis = "...";
+        if (font.MeasureText(text) <= maxWidth)
+            return text;
+
+        for (var len = text.Length - 1; len > 0; len--)
+        {
+            var truncated = text[..len] + ellipsis;
+            if (font.MeasureText(truncated) <= maxWidth)
+                return truncated;
+        }
+
+        return ellipsis;
     }
 
     private static void DrawBar(SKCanvas canvas, DisplaySlot slot,
@@ -229,7 +542,7 @@ internal static class TemplateRenderer
 
     private static void DrawCheckbox(SKCanvas canvas, DisplaySlot slot,
         in GroupDisplayState group, int groupIndex,
-        float x, float y)
+        float x, float y, string? defaultFontFamily)
     {
         var isChecked = BindingResolver.ResolveBool(slot.Checked, group, groupIndex);
         var label = BindingResolver.ResolveString(slot.Label, group, groupIndex);
@@ -243,7 +556,8 @@ internal static class TemplateRenderer
         const int textGap = 6;
 
         var fontStyle = isChecked ? SKFontStyle.Bold : SKFontStyle.Normal;
-        using var font = new SKFont(SKTypeface.FromFamilyName("sans-serif", fontStyle), slot.FontSize > 0 ? slot.FontSize : 16);
+        var typeface = ResolveTypeface(slot.FontFamily, defaultFontFamily, fontStyle);
+        using var font = new SKFont(typeface, slot.FontSize > 0 ? slot.FontSize : 16);
         using var textPaint = new SKPaint { Color = activeColor, IsAntialias = true };
 
         // Measure to center
@@ -433,6 +747,110 @@ internal static class TemplateRenderer
         }
 
         return null;
+    }
+
+    // ── Font loading ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Resolve a typeface from a slot-level font family, a layout-level default, or
+    /// the built-in "sans-serif" fallback. Supports:
+    /// <list type="bullet">
+    ///   <item>System font family names (e.g. "monospace", "serif", "Noto Sans")</item>
+    ///   <item>Paths to .ttf/.otf files relative to the Layouts/ or config folder</item>
+    /// </list>
+    /// For font file paths, bold weight is resolved automatically by convention:
+    /// if the path contains "-Regular", it is replaced with "-Bold"; otherwise
+    /// "-Bold" is inserted before the extension (e.g. "Foo.ttf" → "Foo-Bold.ttf").
+    /// If the bold variant file doesn't exist, the regular file is used and
+    /// SkiaSharp will apply synthetic bolding.
+    ///
+    /// Results are cached so each unique font is loaded from disk at most once.
+    /// </summary>
+    private static SKTypeface ResolveTypeface(string? slotFont, string? layoutFont, SKFontStyle style)
+    {
+        var fontName = slotFont ?? layoutFont;
+
+        if (string.IsNullOrEmpty(fontName))
+            return SKTypeface.FromFamilyName("sans-serif", style);
+
+        // Check if this looks like a file path (has a font file extension)
+        if (IsFontFilePath(fontName))
+        {
+            // For bold weight, try to find a bold variant file first
+            if (style.Weight >= (int)SKFontStyleWeight.SemiBold)
+            {
+                var boldPath = DeriveBoldPath(fontName);
+                if (boldPath is not null)
+                {
+                    var boldTypeface = LoadTypefaceFromFile(boldPath);
+                    if (boldTypeface is not null)
+                        return boldTypeface;
+                }
+            }
+
+            var typeface = LoadTypefaceFromFile(fontName);
+            if (typeface is not null)
+                return typeface;
+
+            // File not found or failed to load — fall back to system lookup
+        }
+
+        // System font family lookup — cache by "family|weight|width|slant"
+        var cacheKey = $"family:{fontName}|{style.Weight}|{style.Width}|{style.Slant}";
+        return TypefaceCache.GetOrAdd(cacheKey, _ =>
+            SKTypeface.FromFamilyName(fontName, style)) ?? SKTypeface.FromFamilyName("sans-serif", style);
+    }
+
+    /// <summary>
+    /// Derive the bold variant file path from a regular font file path.
+    /// "Fonts/Montserrat-Regular.ttf" → "Fonts/Montserrat-Bold.ttf"
+    /// "Fonts/MyFont.ttf" → "Fonts/MyFont-Bold.ttf"
+    /// </summary>
+    private static string? DeriveBoldPath(string path)
+    {
+        var dir = Path.GetDirectoryName(path) ?? "";
+        var name = Path.GetFileNameWithoutExtension(path);
+        var ext = Path.GetExtension(path);
+
+        // Replace -Regular/-regular with -Bold
+        string boldName;
+        if (name.EndsWith("-Regular", StringComparison.OrdinalIgnoreCase))
+            boldName = name[..^"-Regular".Length] + "-Bold";
+        else
+            boldName = name + "-Bold";
+
+        return Path.Combine(dir, boldName + ext);
+    }
+
+    /// <summary>
+    /// Check if a font name looks like a file path (has .ttf, .otf, or .woff2 extension).
+    /// </summary>
+    private static bool IsFontFilePath(string name) =>
+        name.EndsWith(".ttf", StringComparison.OrdinalIgnoreCase) ||
+        name.EndsWith(".otf", StringComparison.OrdinalIgnoreCase) ||
+        name.EndsWith(".woff2", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Load a typeface from a font file on disk with caching. Uses the same
+    /// safe-path resolution as image loading (Layouts/ folder and config folder).
+    /// </summary>
+    private static SKTypeface? LoadTypefaceFromFile(string path)
+    {
+        var resolvedPath = ResolveSafeImagePath(path); // Same path rules as images
+        if (resolvedPath is null) return null;
+
+        return TypefaceCache.GetOrAdd(resolvedPath, static p =>
+        {
+            try
+            {
+                if (!File.Exists(p)) return null;
+                return SKTypeface.FromFile(p);
+            }
+            catch
+            {
+                return null;
+            }
+        });
     }
 
     // ── Helpers ──────────────────────────────────────────────────────

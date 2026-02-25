@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Logging;
 using VolMon.Core.Audio;
 using VolMon.Core.Ipc;
+using AudioProcessInfo = VolMon.Core.Ipc.AudioProcessInfo;
+using AudioDeviceInfo = VolMon.Core.Ipc.AudioDeviceInfo;
 
 namespace VolMon.Hardware;
 
@@ -89,7 +91,10 @@ internal sealed class DeviceManager : IAsyncDisposable
     /// <summary>
     /// Broadcast a daemon state-changed event to all active sessions.
     /// </summary>
-    public void BroadcastStateChanged(List<AudioGroup> groups)
+    public void BroadcastStateChanged(
+        List<AudioGroup> groups,
+        List<AudioProcessInfo>? processes = null,
+        List<AudioDeviceInfo>? devices = null)
     {
         List<DeviceSession> sessions;
         lock (_sessionsLock)
@@ -99,7 +104,7 @@ internal sealed class DeviceManager : IAsyncDisposable
 
         foreach (var session in sessions)
         {
-            session.OnDaemonStateChanged(groups);
+            session.OnDaemonStateChanged(groups, processes, devices);
         }
     }
 

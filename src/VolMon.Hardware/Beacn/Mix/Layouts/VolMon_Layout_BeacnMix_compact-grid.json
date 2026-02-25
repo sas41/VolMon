@@ -3,6 +3,7 @@
   "height": 480,
   "background": "#0D0D0D",
   "jpegQuality": 50,
+  "fontFamily": "Fonts/Montserrat-Regular.ttf",
   "slots": [
     {
       "type": "line",
@@ -35,15 +36,6 @@
         {
           "type": "text",
           "x": "20", "y": "28", "w": "360",
-          "text": "{group.name}",
-          "color": "#FFFFFF",
-          "fontSize": 20,
-          "fontWeight": "bold",
-          "align": "center"
-        },
-        {
-          "type": "text",
-          "x": "20", "y": "68", "w": "360",
           "text": "{group.volume}%",
           "color": "{group.color}",
           "fontSize": 64,
@@ -52,7 +44,7 @@
         },
         {
           "type": "bar",
-          "x": "40", "y": "160", "w": "320", "h": "16",
+          "x": "40", "y": "118", "w": "320", "h": "16",
           "value": "{group.volume}",
           "color": "{group.color}",
           "trackColor": "#252525",
@@ -61,7 +53,7 @@
         },
         {
           "type": "bar",
-          "x": "40", "y": "185", "w": "320", "h": "4",
+          "x": "40", "y": "143", "w": "320", "h": "4",
           "value": "{group.volume}",
           "color": "{group.color}",
           "trackColor": "#0D0D0D",
@@ -71,12 +63,22 @@
         },
         {
           "type": "checkbox",
-          "x": "200", "y": "202",
+          "x": "200", "y": "160",
           "checked": "{group.muted}",
           "label": "MUTED",
           "checkedColor": "#E63946",
           "uncheckedColor": "#333333",
           "fontSize": 13
+        },
+        {
+          "type": "text",
+          "x": "30", "y": "190", "w": "340",
+          "text": "{group.activeMembers}",
+          "secondaryText": "{group.inactiveMembers}",
+          "color": "#666666",
+          "secondaryColor": "#555555",
+          "fontSize": 12,
+          "align": "center"
         }
       ]
     },
@@ -99,15 +101,6 @@
         {
           "type": "text",
           "x": "20", "y": "268", "w": "360",
-          "text": "{group.name}",
-          "color": "#FFFFFF",
-          "fontSize": 20,
-          "fontWeight": "bold",
-          "align": "center"
-        },
-        {
-          "type": "text",
-          "x": "20", "y": "308", "w": "360",
           "text": "{group.volume}%",
           "color": "{group.color}",
           "fontSize": 64,
@@ -116,7 +109,7 @@
         },
         {
           "type": "bar",
-          "x": "40", "y": "400", "w": "320", "h": "16",
+          "x": "40", "y": "358", "w": "320", "h": "16",
           "value": "{group.volume}",
           "color": "{group.color}",
           "trackColor": "#252525",
@@ -125,7 +118,7 @@
         },
         {
           "type": "bar",
-          "x": "40", "y": "425", "w": "320", "h": "4",
+          "x": "40", "y": "383", "w": "320", "h": "4",
           "value": "{group.volume}",
           "color": "{group.color}",
           "trackColor": "#0D0D0D",
@@ -135,12 +128,22 @@
         },
         {
           "type": "checkbox",
-          "x": "200", "y": "442",
+          "x": "200", "y": "400",
           "checked": "{group.muted}",
           "label": "MUTED",
           "checkedColor": "#E63946",
           "uncheckedColor": "#333333",
           "fontSize": 13
+        },
+        {
+          "type": "text",
+          "x": "30", "y": "430", "w": "340",
+          "text": "{group.activeMembers}",
+          "secondaryText": "{group.inactiveMembers}",
+          "color": "#666666",
+          "secondaryColor": "#555555",
+          "fontSize": 12,
+          "align": "center"
         }
       ]
     }

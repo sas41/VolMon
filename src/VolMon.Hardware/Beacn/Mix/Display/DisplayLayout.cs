@@ -28,6 +28,17 @@ public sealed class DisplayLayout
     /// </summary>
     public string? BackgroundImage { get; set; }
 
+    /// <summary>
+    /// Default font family for all text in this layout. Can be:
+    /// <list type="bullet">
+    ///   <item>A system font family name (e.g. "monospace", "serif", "Noto Sans")</item>
+    ///   <item>A path to a .ttf/.otf file relative to the Layouts/ or config folder</item>
+    /// </list>
+    /// Individual slots can override this with their own <see cref="DisplaySlot.FontFamily"/>.
+    /// Defaults to the bundled Montserrat font. Set to null to use "sans-serif".
+    /// </summary>
+    public string? FontFamily { get; set; } = "Fonts/Montserrat-Regular.ttf";
+
     /// <summary>The list of visual slots to render, drawn in order (back to front).</summary>
     public List<DisplaySlot> Slots { get; set; } = [];
 
@@ -72,12 +83,12 @@ public sealed class DisplayLayout
     ///
     /// Files outside the bundled Layouts/ folder and the config folder are never read.
     /// </summary>
-    public static async Task<DisplayLayout> LoadAsync(string layoutName = "VolMon_Layout_BeacnMix_default-vertical")
+    public static async Task<DisplayLayout> LoadAsync(string layoutName = "VolMon_Layout_BeacnMix_horseshoe-gauges")
     {
         // Sanitize: strip path separators to prevent directory traversal
         var safeName = Path.GetFileNameWithoutExtension(layoutName);
         if (string.IsNullOrWhiteSpace(safeName))
-            return DefaultLayout.Create();
+            return new DisplayLayout();
 
         // 1. Bundled preset
         var bundledPath = Path.Combine(GetBundledLayoutsDir(), $"{safeName}.json");
@@ -96,8 +107,8 @@ public sealed class DisplayLayout
             return await LoadFromFileAsync(fullConfigPath);
         }
 
-        // 3. Hardcoded fallback
-        return DefaultLayout.Create();
+        // 3. Fallback — empty layout (800x480 dark background, no slots)
+        return new DisplayLayout();
     }
 
     /// <summary>
@@ -121,11 +132,11 @@ public sealed class DisplayLayout
         {
             var json = await File.ReadAllTextAsync(path);
             return JsonSerializer.Deserialize<DisplayLayout>(json, JsonOptions)
-                ?? DefaultLayout.Create();
+                ?? new DisplayLayout();
         }
         catch
         {
-            return DefaultLayout.Create();
+            return new DisplayLayout();
         }
     }
 
@@ -165,6 +176,14 @@ public sealed class DisplaySlot
     /// <summary>Color as hex string or binding (e.g. "#FFFFFF" or "{group.color}").</summary>
     public string? Color { get; set; }
 
+    /// <summary>
+    /// Secondary color for text slots. Used to render <see cref="SecondaryText"/>
+    /// in a different color from the primary <see cref="Text"/>. Both are drawn
+    /// as one continuous block — the secondary text continues immediately after
+    /// the primary text with no gap.
+    /// </summary>
+    public string? SecondaryColor { get; set; }
+
     /// <summary>Background/fill color as hex string or binding.</summary>
     public string? Fill { get; set; }
 
@@ -178,6 +197,21 @@ public sealed class DisplaySlot
 
     /// <summary>Text content or binding (e.g. "{group.name}" or "{group.volume}%").</summary>
     public string? Text { get; set; }
+
+    /// <summary>
+    /// Secondary text content or binding. Rendered immediately after <see cref="Text"/>
+    /// in <see cref="SecondaryColor"/> (or the primary color if SecondaryColor is not set).
+    /// Useful for showing two groups of data in one continuous block with different colors,
+    /// e.g. active members in primary color followed by inactive members in a dimmer color.
+    /// </summary>
+    public string? SecondaryText { get; set; }
+
+    /// <summary>
+    /// Font family for this slot. Overrides the layout-level <see cref="DisplayLayout.FontFamily"/>.
+    /// Can be a system font family name (e.g. "monospace") or a path to a .ttf/.otf file
+    /// relative to the Layouts/ or config folder. If null, uses the layout default.
+    /// </summary>
+    public string? FontFamily { get; set; }
 
     /// <summary>Font size in pixels.</summary>
     public float FontSize { get; set; } = 16;

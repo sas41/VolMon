@@ -104,7 +104,7 @@ internal sealed class HardwareBridgeService : BackgroundService
     private void OnDaemonEvent(object? sender, IpcEvent e)
     {
         if (e.Name == "state-changed" && e.Groups is not null)
-            _deviceManager?.BroadcastStateChanged(e.Groups);
+            _deviceManager?.BroadcastStateChanged(e.Groups, e.Processes, e.Devices);
     }
 
     private void OnDaemonDisconnected(object? sender, EventArgs e)

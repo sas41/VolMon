@@ -34,6 +34,18 @@ public readonly struct GroupDisplayState
     public int Volume { get; init; }
     public bool Muted { get; init; }
     public string? Color { get; init; }
+
+    /// <summary>
+    /// Names of programs/devices currently producing audio in this group.
+    /// Empty array if none are active. Never null.
+    /// </summary>
+    public string[] ActiveMembers { get; init; }
+
+    /// <summary>
+    /// Names of programs/devices configured in this group but not currently producing audio.
+    /// Empty array if all members are active or none configured. Never null.
+    /// </summary>
+    public string[] InactiveMembers { get; init; }
 }
 
 /// <summary>
@@ -66,6 +78,18 @@ public interface IHardwareController : IAsyncDisposable
 
     /// <summary>Volume change per unit of dial rotation (percentage points).</summary>
     int VolumeStepPerDelta { get; }
+
+    /// <summary>Whether knob acceleration is enabled (faster rotation = larger steps).</summary>
+    bool KnobAcceleration { get; }
+
+    /// <summary>Minimum delta magnitude before acceleration kicks in.</summary>
+    int AccelerationThreshold { get; }
+
+    /// <summary>Maximum multiplier applied during fast rotation.</summary>
+    int AccelerationMaxMultiplier { get; }
+
+    /// <summary>Delta magnitude at which acceleration reaches its maximum.</summary>
+    int AccelerationSaturation { get; }
 
     /// <summary>Whether this device has a display that can show group state.</summary>
     bool HasDisplay { get; }

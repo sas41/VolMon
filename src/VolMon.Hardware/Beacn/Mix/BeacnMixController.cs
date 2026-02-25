@@ -13,7 +13,7 @@ internal sealed class BeacnMixController : IHardwareController
     private readonly ILogger<BeacnMixController> _logger;
     private readonly BeacnMixDevice _device = new();
     private BeacnMixConfig _config = new();
-    private volatile DisplayLayout _layout = DefaultLayout.Create();
+    private volatile DisplayLayout _layout = new();
     private CancellationTokenSource? _cts;
     private Task? _pollTask;
     private Task? _displayTimerTask;
@@ -36,6 +36,12 @@ internal sealed class BeacnMixController : IHardwareController
     private GroupDisplayState[] _groupStates = [];
     private readonly ManualResetEventSlim _displayDirtySignal = new(false);
 
+    /// <summary>
+    /// Cached pixel data from the last rendered frame, used for dirty-region detection.
+    /// Managed by TemplateRenderer.RenderWithDiff — null until the first render.
+    /// </summary>
+    private byte[]? _previousFramePixels;
+
     public event EventHandler<DialRotatedEventArgs>? DialRotated;
     public event EventHandler<ButtonPressedEventArgs>? ButtonPressed;
 
@@ -44,6 +50,10 @@ internal sealed class BeacnMixController : IHardwareController
     public int DialCount => 4;
     public bool IsConnected => _device.IsOpen;
     public int VolumeStepPerDelta => _config.VolumeStepPerDelta;
+    public bool KnobAcceleration => _config.KnobAcceleration;
+    public int AccelerationThreshold => _config.AccelerationThreshold;
+    public int AccelerationMaxMultiplier => _config.AccelerationMaxMultiplier;
+    public int AccelerationSaturation => _config.AccelerationSaturation;
     public bool HasDisplay => true;
 
     /// <summary>
@@ -245,6 +255,7 @@ internal sealed class BeacnMixController : IHardwareController
                     oldLayout, newConfig.Layout);
 
                 _layout = await DisplayLayout.LoadAsync(newConfig.Layout);
+                _previousFramePixels = null; // Invalidate pixel cache — force full re-render
                 _displayDirtySignal.Set(); // trigger immediate re-render
             }
 
@@ -389,8 +400,14 @@ internal sealed class BeacnMixController : IHardwareController
                     _displayDirtySignal.Reset();
                     try
                     {
-                        var jpeg = TemplateRenderer.Render(_layout, _groupStates);
-                        _device.SendImage(jpeg);
+                        var result = TemplateRenderer.RenderWithDiff(_layout, _groupStates, ref _previousFramePixels);
+
+                        if (result is not null)
+                        {
+                            var r = result.Value;
+                            _device.SendImage(r.JpegData, r.X, r.Y);
+                        }
+                        // else: frame identical to previous, skip USB transfer
                     }
                     catch (Exception ex)
                     {

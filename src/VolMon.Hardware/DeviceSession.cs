@@ -41,6 +41,12 @@ internal sealed class DeviceSession : IAsyncDisposable
     private readonly bool[] _dialMuted;
     private readonly string?[] _dialGroupNames;
     private readonly string?[] _dialGroupColors;
+    private readonly string[]?[] _dialActiveMembers;
+    private readonly string[]?[] _dialInactiveMembers;
+
+    // Cached process/device data for member resolution
+    private List<AudioProcessInfo>? _lastProcesses;
+    private List<AudioDeviceInfo>? _lastDevices;
 
     // Debounce + echo suppression
     private readonly int[] _pendingDeltas;
@@ -65,6 +71,8 @@ internal sealed class DeviceSession : IAsyncDisposable
         _dialMuted = new bool[dialCount];
         _dialGroupNames = new string?[dialCount];
         _dialGroupColors = new string?[dialCount];
+        _dialActiveMembers = new string[]?[dialCount];
+        _dialInactiveMembers = new string[]?[dialCount];
         _pendingDeltas = new int[dialCount];
         _debounceCts = new CancellationTokenSource?[dialCount];
         _lastCommandTime = new DateTime[dialCount];
@@ -98,9 +106,16 @@ internal sealed class DeviceSession : IAsyncDisposable
     /// Push a state update from the daemon to this device (called by DeviceManager
     /// when a state-changed event arrives).
     /// </summary>
-    public void OnDaemonStateChanged(List<AudioGroup> groups)
+    public void OnDaemonStateChanged(
+        List<AudioGroup> groups,
+        List<AudioProcessInfo>? processes = null,
+        List<AudioDeviceInfo>? devices = null)
     {
         if (State != DeviceSessionState.Running) return;
+
+        // Cache process/device data for member resolution
+        if (processes is not null) _lastProcesses = processes;
+        if (devices is not null) _lastDevices = devices;
 
         try
         {
@@ -172,9 +187,15 @@ internal sealed class DeviceSession : IAsyncDisposable
     {
         try
         {
-            var resp = await _ipc.SendAsync(new IpcRequest { Command = "list-groups" }, ct);
+            // Use "status" instead of "list-groups" to also get process/device data
+            // for resolving active group members on startup.
+            var resp = await _ipc.SendAsync(new IpcRequest { Command = "status" }, ct);
             if (resp.Success && resp.Groups is not null)
+            {
+                if (resp.Processes is not null) _lastProcesses = resp.Processes;
+                if (resp.Devices is not null) _lastDevices = resp.Devices;
                 ApplyGroupState(resp.Groups);
+            }
         }
         catch (Exception ex)
         {
@@ -229,7 +250,11 @@ internal sealed class DeviceSession : IAsyncDisposable
 
         var step = _controller.VolumeStepPerDelta;
         var currentVol = _dialVolumes[dialIndex];
-        var newVol = Math.Clamp(currentVol + accumulatedDelta * step, 0, 100);
+
+        // Apply knob acceleration: scale the effective step based on rotation speed
+        var effectiveStep = ApplyAcceleration(accumulatedDelta, step);
+        var direction = Math.Sign(accumulatedDelta);
+        var newVol = Math.Clamp(currentVol + direction * effectiveStep, 0, 100);
 
         _dialVolumes[dialIndex] = newVol;
         _lastCommandTime[dialIndex] = DateTime.UtcNow;
@@ -308,6 +333,9 @@ internal sealed class DeviceSession : IAsyncDisposable
                 _dialMuted[i] = g.Muted;
                 _dialGroupNames[i] = g.Name;
                 _dialGroupColors[i] = g.Color;
+
+                // Resolve active/inactive members for this group
+                ResolveGroupMembers(g, i);
             }
             else
             {
@@ -316,12 +344,115 @@ internal sealed class DeviceSession : IAsyncDisposable
                 _dialMuted[i] = false;
                 _dialGroupNames[i] = null;
                 _dialGroupColors[i] = null;
+                _dialActiveMembers[i] = null;
+                _dialInactiveMembers[i] = null;
             }
 
             UpdateDialColor(i);
         }
 
         PushDisplayUpdate();
+    }
+
+    /// <summary>
+    /// Determine which configured programs/devices in a group are currently running
+    /// vs not running. A process is considered "active" if it appears in the daemon's
+    /// process snapshot (either with audio streams assigned to this group, or running
+    /// but silent). This matches the GUI behavior where running-but-silent processes
+    /// show a green status dot. Processes not in the snapshot at all are "inactive."
+    /// </summary>
+    private void ResolveGroupMembers(AudioGroup group, int dialIndex)
+    {
+        var active = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var configured = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Add all configured programs and devices
+        foreach (var prog in group.Programs)
+            configured.Add(prog);
+        foreach (var dev in group.Devices)
+            configured.Add(dev);
+
+        // Find active members from process snapshot.
+        // A process is active if:
+        //   1. It has streams assigned to this group (producing audio), OR
+        //   2. It's running but silent AND is configured in this group
+        //      (daemon only sends silent processes if they're configured)
+        if (_lastProcesses is not null)
+        {
+            foreach (var proc in _lastProcesses)
+            {
+                var hasStreamInGroup = false;
+                foreach (var stream in proc.Streams)
+                {
+                    if (stream.AssignedGroup == group.Id)
+                    {
+                        hasStreamInGroup = true;
+                        break;
+                    }
+                }
+
+                if (hasStreamInGroup)
+                {
+                    active.Add(proc.Name);
+                }
+                else if (proc.Streams.Count == 0 && configured.Contains(proc.Name))
+                {
+                    // Running but silent — treat as active (matches GUI behavior)
+                    active.Add(proc.Name);
+                }
+            }
+        }
+
+        // Find active devices from device snapshot
+        if (_lastDevices is not null)
+        {
+            foreach (var dev in _lastDevices)
+            {
+                if (dev.AssignedGroup == group.Id)
+                    active.Add(dev.Description ?? dev.Name);
+            }
+        }
+
+        _dialActiveMembers[dialIndex] = active.Count > 0 ? [.. active] : [];
+        _dialInactiveMembers[dialIndex] = configured.Except(active, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    // ── Knob acceleration ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Apply acceleration curve to the accumulated delta. When the knob is turned
+    /// faster (larger accumulated delta within the debounce window), the effective
+    /// volume step is scaled up.
+    ///
+    /// Returns the absolute step size (always positive) to apply in the direction
+    /// of the accumulated delta.
+    /// </summary>
+    private int ApplyAcceleration(int accumulatedDelta, int baseStep)
+    {
+        if (!_controller.KnobAcceleration)
+            return Math.Abs(accumulatedDelta) * baseStep;
+
+        var absDelta = Math.Abs(accumulatedDelta);
+        var threshold = _controller.AccelerationThreshold;
+        var maxMultiplier = _controller.AccelerationMaxMultiplier;
+        var saturation = _controller.AccelerationSaturation;
+
+        if (absDelta <= threshold)
+        {
+            // Below threshold: linear, no acceleration
+            return absDelta * baseStep;
+        }
+
+        // Above threshold: scale the excess portion with an acceleration multiplier.
+        // The multiplier ramps linearly from 1x at threshold to maxMultiplier at saturation.
+        var excess = absDelta - threshold;
+        var range = Math.Max(saturation - threshold, 1);
+        var t = Math.Min((float)excess / range, 1f);
+        var multiplier = 1f + t * (maxMultiplier - 1f);
+
+        // Base portion (below threshold) + accelerated excess
+        var result = threshold * baseStep + (int)Math.Ceiling(excess * baseStep * multiplier);
+        return result;
     }
 
     // ── Display ─────────────────────────────────────────────────────
@@ -338,7 +469,9 @@ internal sealed class DeviceSession : IAsyncDisposable
                 Name = _dialGroupNames[i] ?? $"Dial {i + 1}",
                 Volume = _dialVolumes[i],
                 Muted = _dialMuted[i],
-                Color = _dialGroupColors[i]
+                Color = _dialGroupColors[i],
+                ActiveMembers = _dialActiveMembers[i] ?? [],
+                InactiveMembers = _dialInactiveMembers[i] ?? []
             };
         }
 

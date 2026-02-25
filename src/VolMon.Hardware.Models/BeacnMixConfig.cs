@@ -28,10 +28,38 @@ public sealed class BeacnMixConfig
     public int VolumeStepPerDelta { get; set; } = 1;
 
     /// <summary>
+    /// Enable knob acceleration: faster rotation produces larger volume steps.
+    /// When enabled, the volume step is multiplied by an acceleration factor
+    /// based on how fast the knob is being turned. Default: true.
+    /// </summary>
+    public bool KnobAcceleration { get; set; } = true;
+
+    /// <summary>
+    /// Minimum accumulated delta magnitude (within a debounce window) before
+    /// acceleration kicks in. Below this threshold, the base VolumeStepPerDelta
+    /// is used. Default: 3.
+    /// </summary>
+    public int AccelerationThreshold { get; set; } = 3;
+
+    /// <summary>
+    /// Maximum multiplier applied to VolumeStepPerDelta during fast rotation.
+    /// The actual multiplier scales linearly from 1x at the threshold to this
+    /// value at the saturation point. Default: 6.
+    /// </summary>
+    public int AccelerationMaxMultiplier { get; set; } = 6;
+
+    /// <summary>
+    /// Accumulated delta magnitude at which the acceleration multiplier reaches
+    /// its maximum. Deltas beyond this value don't increase the multiplier further.
+    /// Default: 12.
+    /// </summary>
+    public int AccelerationSaturation { get; set; } = 12;
+
+    /// <summary>
     /// Display layout name. Matches a bundled preset or custom layout filename (without .json).
     /// Checked against bundled Layouts/ folder first, then the config folder (~/.config/volmon/).
     /// </summary>
-    public string Layout { get; set; } = "VolMon_Layout_BeacnMix_default-vertical";
+    public string Layout { get; set; } = "VolMon_Layout_BeacnMix_horseshoe-gauges";
 
     // ── Serialization ───────────────────────────────────────────────
 

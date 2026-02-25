@@ -153,7 +153,14 @@ internal sealed class BeacnMixDevice : IDisposable
     /// Send a JPEG image to the display at position (0,0).
     /// The image data is sent in 1020-byte chunks over interrupt transfers.
     /// </summary>
-    public void SendImage(byte[] jpegData)
+    public void SendImage(byte[] jpegData) => SendImage(jpegData, 0, 0);
+
+    /// <summary>
+    /// Send a JPEG image to the display at the specified position.
+    /// The image data is sent in 1020-byte chunks over interrupt transfers.
+    /// Use non-zero x/y for partial region updates.
+    /// </summary>
+    public void SendImage(byte[] jpegData, int x, int y)
     {
         EnsureOpen();
 
@@ -188,7 +195,11 @@ internal sealed class BeacnMixDevice : IDisposable
         var sizeMinusOne = (uint)(jpegData.Length - 1);
         BitConverter.TryWriteBytes(_completeBuffer.AsSpan(4, 4), sizeMinusOne);
 
-        // X position = 0, Y position = 0 (both u32 LE, already zero)
+        // X position as u32 LE
+        BitConverter.TryWriteBytes(_completeBuffer.AsSpan(8, 4), (uint)x);
+
+        // Y position as u32 LE
+        BitConverter.TryWriteBytes(_completeBuffer.AsSpan(12, 4), (uint)y);
 
         WriteCommandWithRetry(_completeBuffer, 16);
     }

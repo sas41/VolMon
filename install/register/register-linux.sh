@@ -139,7 +139,6 @@ if $INCLUDE_HARDWARE; then
 [Unit]
 Description=VolMon Hardware Daemon
 After=volmon.service
-Wants=volmon.service
 
 [Service]
 Type=simple

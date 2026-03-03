@@ -4,9 +4,12 @@ After=volmon.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/volmon-hardware
+WorkingDirectory=/mnt/data/Projects/Software/VolMon/publish/linux-x64
+ExecStart=/mnt/data/Projects/Software/VolMon/publish/linux-x64/VolMon.Hardware
 Restart=on-failure
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=default.target

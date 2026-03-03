@@ -113,8 +113,8 @@ mkdir -p "$SYSTEMD_DIR"
 
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=VolMon Audio Group Volume Daemon
-After=default.target pulseaudio.service pipewire.service
+Description=VolMon Volume Monitoring and Control Daemon
+After=pulseaudio.service pipewire.service
 
 [Service]
 Type=simple
@@ -142,9 +142,12 @@ After=volmon.service
 
 [Service]
 Type=simple
+WorkingDirectory=$SCRIPT_DIR
 ExecStart=$HARDWARE_BIN
 Restart=on-failure
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=default.target

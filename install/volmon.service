@@ -1,6 +1,6 @@
 [Unit]
-Description=VolMon Audio Group Volume Daemon
-After=default.target pulseaudio.service pipewire.service
+Description=VolMon Volume Monitoring and Control Daemon
+After=pulseaudio.service pipewire.service
 
 [Service]
 Type=simple

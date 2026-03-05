@@ -66,22 +66,33 @@ public sealed class DisplayLayout
     }
 
     /// <summary>
-    /// Get the bundled Layouts directory next to the running executable.
+    /// Get the bundled Layouts directory for Beacn Mix layouts, next to the running
+    /// executable. Structure mirrors the source tree: Hardware/Beacn/Mix/Layouts/.
     /// </summary>
     public static string GetBundledLayoutsDir()
     {
-        var exeDir = AppContext.BaseDirectory;
-        return Path.Combine(exeDir, "Layouts");
+        return Path.Combine(AppContext.BaseDirectory, "Hardware", "Beacn", "Mix", "Layouts");
+    }
+
+    /// <summary>
+    /// Get the user custom Layouts directory inside the VolMon config folder.
+    /// Users can drop their own layout JSON files here and they will be discovered
+    /// alongside the bundled presets.
+    /// Structure mirrors the bundled one: <configdir>/Hardware/Beacn/Mix/Layouts/.
+    /// </summary>
+    public static string GetUserLayoutsDir()
+    {
+        return Path.Combine(GetConfigDir(), "Hardware", "Beacn", "Mix", "Layouts");
     }
 
     /// <summary>
     /// Load a layout by name.
     /// Resolution order:
-    ///   1. Bundled preset — checks for "{layoutName}.json" in the Layouts/ folder
-    ///   2. Config folder — checks for "{layoutName}.json" in ~/.config/volmon/
-    ///   3. Hardcoded default
+    ///   1. Bundled preset  — Hardware/Beacn/Mix/Layouts/{name}.json next to the exe
+    ///   2. User layout     — &lt;configdir&gt;/Hardware/Beacn/Mix/Layouts/{name}.json
+    ///   3. Hardcoded default (empty layout, 800x480 dark background, no slots)
     ///
-    /// Files outside the bundled Layouts/ folder and the config folder are never read.
+    /// Files outside these two roots are never read.
     /// </summary>
     public static async Task<DisplayLayout> LoadAsync(string layoutName = "VolMon_Layout_BeacnMix_horseshoe-gauges")
     {
@@ -95,16 +106,15 @@ public sealed class DisplayLayout
         if (File.Exists(bundledPath))
             return await LoadFromFileAsync(bundledPath);
 
-        // 2. Custom layout in config folder
-        var configPath = Path.Combine(GetConfigDir(), $"{safeName}.json");
-        var fullConfigPath = Path.GetFullPath(configPath);
-        var fullConfigDir = Path.GetFullPath(GetConfigDir());
+        // 2. User layout in config folder
+        var userDir      = Path.GetFullPath(GetUserLayoutsDir());
+        var userPath     = Path.GetFullPath(Path.Combine(userDir, $"{safeName}.json"));
 
-        // Ensure the resolved path is still inside the config directory
-        if (fullConfigPath.StartsWith(fullConfigDir + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-            && File.Exists(fullConfigPath))
+        // Ensure the resolved path is still inside the user layouts directory
+        if (userPath.StartsWith(userDir + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            && File.Exists(userPath))
         {
-            return await LoadFromFileAsync(fullConfigPath);
+            return await LoadFromFileAsync(userPath);
         }
 
         // 3. Fallback — empty layout (800x480 dark background, no slots)
@@ -112,18 +122,33 @@ public sealed class DisplayLayout
     }
 
     /// <summary>
-    /// List available bundled layout preset names (full filenames without extension).
+    /// List all available layout preset names (without .json extension).
+    /// Returns bundled presets first, then any additional user layouts from the
+    /// config folder that are not already in the bundled set.
     /// </summary>
     public static string[] ListBundledLayouts()
     {
-        var dir = GetBundledLayoutsDir();
-        if (!Directory.Exists(dir))
-            return [];
+        var names = new List<string>();
 
-        return Directory.GetFiles(dir, "*.json")
-            .Select(f => Path.GetFileNameWithoutExtension(f))
-            .OrderBy(n => n)
-            .ToArray();
+        var bundledDir = GetBundledLayoutsDir();
+        if (Directory.Exists(bundledDir))
+        {
+            names.AddRange(Directory.GetFiles(bundledDir, "*.json")
+                .Select(f => Path.GetFileNameWithoutExtension(f)));
+        }
+
+        var userDir = GetUserLayoutsDir();
+        if (Directory.Exists(userDir))
+        {
+            foreach (var file in Directory.GetFiles(userDir, "*.json"))
+            {
+                var name = Path.GetFileNameWithoutExtension(file);
+                if (!names.Contains(name))
+                    names.Add(name);
+            }
+        }
+
+        return [.. names.OrderBy(n => n)];
     }
 
     private static async Task<DisplayLayout> LoadFromFileAsync(string path)

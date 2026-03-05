@@ -40,34 +40,56 @@ internal static class HardwareConfigService
     /// Layouts directory. Checks multiple locations (installed, dev build output,
     /// dev source) and returns layout names without the .json extension.
     /// </summary>
+    /// <summary>
+    /// Returns the bundled layouts directory: Hardware/Beacn/Mix/Layouts/ next to
+    /// the running executable. Mirrors the path used by the hardware daemon.
+    /// </summary>
+    private static string GetBundledLayoutsDir() =>
+        Path.Combine(AppContext.BaseDirectory, "Hardware", "Beacn", "Mix", "Layouts");
+
+    /// <summary>
+    /// Returns the user layouts directory inside the VolMon config folder.
+    /// Users can place custom layout JSON files here.
+    /// </summary>
+    private static string GetUserLayoutsDir()
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        if (string.IsNullOrEmpty(appData))
+            appData = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config");
+        return Path.Combine(appData, "volmon", "Hardware", "Beacn", "Mix", "Layouts");
+    }
+
     public static string[] ListBundledLayouts()
     {
+        var names = new List<string>();
+
+        // 1. Bundled layouts next to the exe (installed or published)
+        CollectLayouts(GetBundledLayoutsDir(), names);
+
+        // 2. User layouts from config folder
+        CollectLayouts(GetUserLayoutsDir(), names);
+
+        if (names.Count > 0)
+            return [.. names.OrderBy(n => n)];
+
         var baseDir = AppContext.BaseDirectory;
 
-        var dirs = new[]
+        // 3. Dev fallbacks: sibling build output or source tree
+        var devDirs = new[]
         {
-            // Installed side-by-side or published together
-            Path.Combine(baseDir, "Layouts"),
-            // Sibling Hardware project build output (dev)
-            Path.Combine(baseDir, "..", "VolMon.Hardware", "net10.0", "Layouts"),
-            // Sibling Hardware project source layouts (dev, going up from bin/Debug/net10.0)
+            Path.Combine(baseDir, "..", "VolMon.Hardware", "net10.0", "Hardware", "Beacn", "Mix", "Layouts"),
             Path.Combine(baseDir, "..", "..", "..", "..", "VolMon.Hardware", "Beacn", "Mix", "Layouts"),
         };
 
-        foreach (var dir in dirs)
+        foreach (var dir in devDirs)
         {
-            if (!Directory.Exists(dir)) continue;
-
-            var files = Directory.GetFiles(dir, "VolMon_Layout_*.json");
-            if (files.Length == 0) continue;
-
-            return files
-                .Select(f => Path.GetFileNameWithoutExtension(f))
-                .OrderBy(n => n)
-                .ToArray();
+            CollectLayouts(dir, names);
+            if (names.Count > 0)
+                return [.. names.OrderBy(n => n)];
         }
 
-        // Fallback: return known defaults
+        // Last resort: known defaults
         return
         [
             "VolMon_Layout_BeacnMix_default-vertical",
@@ -75,5 +97,16 @@ internal static class HardwareConfigService
             "VolMon_Layout_BeacnMix_compact-grid",
             "VolMon_Layout_BeacnMix_horseshoe-gauges"
         ];
+    }
+
+    private static void CollectLayouts(string dir, List<string> names)
+    {
+        if (!Directory.Exists(dir)) return;
+        foreach (var file in Directory.GetFiles(dir, "VolMon_Layout_*.json"))
+        {
+            var name = Path.GetFileNameWithoutExtension(file);
+            if (!names.Contains(name))
+                names.Add(name);
+        }
     }
 }

@@ -20,9 +20,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="Beacn\Mix\Layouts\*.json" CopyToOutputDirectory="PreserveNewest" Link="Layouts\%(Filename)%(Extension)" />
-    <None Include="Beacn\Mix\Layouts\Fonts\*.ttf" CopyToOutputDirectory="PreserveNewest" Link="Layouts\Fonts\%(Filename)%(Extension)" />
-    <None Include="Beacn\Mix\Layouts\Fonts\*.txt" CopyToOutputDirectory="PreserveNewest" Link="Layouts\Fonts\%(Filename)%(Extension)" />
+    <None Include="Beacn\Mix\Layouts\*.json" CopyToOutputDirectory="PreserveNewest" Link="Hardware\Beacn\Mix\Layouts\%(Filename)%(Extension)" />
+    <None Include="Beacn\Mix\Layouts\Fonts\*.ttf" CopyToOutputDirectory="PreserveNewest" Link="Hardware\Beacn\Mix\Layouts\Fonts\%(Filename)%(Extension)" />
+    <None Include="Beacn\Mix\Layouts\Fonts\*.txt" CopyToOutputDirectory="PreserveNewest" Link="Hardware\Beacn\Mix\Layouts\Fonts\%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

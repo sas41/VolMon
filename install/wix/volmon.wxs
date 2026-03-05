@@ -9,9 +9,11 @@
   The installer presents two features:
     - VolMon (required) — daemon + GUI
     - Hardware Support (optional, default off) — hardware daemon + hardware GUI
+      Includes the layout files and fonts under Hardware\Beacn\Mix\Layouts\.
 
   Build command (called from the CI workflow):
     wix build volmon.wxs \
+      -ext WixToolset.UI.wixext \
       -d SourceDir=<path-to-publish/win-x64> \
       -d Version=<semver> \
       -arch x64 \
@@ -37,9 +39,19 @@
     <!-- Show the feature-selection dialog so the user can opt in to hardware support -->
     <ui:WixUI Id="WixUI_FeatureTree" />
 
-    <!-- ── Install directory ──────────────────────────────────────── -->
+    <!-- ── Directory tree ────────────────────────────────────────── -->
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="VolMon" />
+      <Directory Id="INSTALLFOLDER" Name="VolMon">
+        <Directory Id="HardwareDir" Name="Hardware">
+          <Directory Id="BeacnDir"  Name="Beacn">
+            <Directory Id="MixDir"  Name="Mix">
+              <Directory Id="LayoutsDir"        Name="Layouts">
+                <Directory Id="LayoutsFontsDir" Name="Fonts" />
+              </Directory>
+            </Directory>
+          </Directory>
+        </Directory>
+      </Directory>
     </StandardDirectory>
 
     <!-- ── Core files ────────────────────────────────────────────── -->
@@ -74,6 +86,21 @@
         <File Id="VolMonHardwareGUI" Source="$(SourceDir)\VolMon.HardwareGUI.exe" KeyPath="yes" />
       </Component>
 
+      <!-- Layout JSON files — installed to Hardware\Beacn\Mix\Layouts\ -->
+      <Component Id="LayoutFiles" Guid="A7B8C9D0-E1F2-3A4B-5C6D-E7F8A9B0C1D2" Directory="LayoutsDir">
+        <File Id="Layout_DefaultVertical" Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_default-vertical.json"  KeyPath="yes" />
+        <File Id="Layout_HorizontalBars"  Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_horizontal-bars.json" />
+        <File Id="Layout_CompactGrid"     Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_compact-grid.json" />
+        <File Id="Layout_HorseshoeGauges" Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_horseshoe-gauges.json" />
+      </Component>
+
+      <!-- Bundled fonts — installed to Hardware\Beacn\Mix\Layouts\Fonts\ -->
+      <Component Id="LayoutFonts" Guid="B8C9D0E1-F2A3-4B5C-6D7E-F8A9B0C1D2E3" Directory="LayoutsFontsDir">
+        <File Id="Font_MontserratRegular" Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\Fonts\Montserrat-Regular.ttf" KeyPath="yes" />
+        <File Id="Font_MontserratBold"    Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\Fonts\Montserrat-Bold.ttf" />
+        <File Id="Font_MontserratLicense" Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\Fonts\Montserrat-OFL.txt" />
+      </Component>
+
     </ComponentGroup>
 
     <!-- ── Features ──────────────────────────────────────────────── -->
@@ -104,9 +131,9 @@
       console window flashes during the installer UI.
 
       Four actions cover the matrix of install/uninstall × with/without hardware:
-        RunRegister          — core only (hardware feature not selected)
-        RunRegisterHardware  — core + hardware (hardware feature selected)
-        RunUnregister        — unregister core (hardware feature was not installed)
+        RunRegister           — core only (hardware feature not selected)
+        RunRegisterHardware   — core + hardware (hardware feature selected)
+        RunUnregister         — unregister core (hardware feature was not installed)
         RunUnregisterHardware — unregister core + hardware (hardware feature was installed)
     -->
 

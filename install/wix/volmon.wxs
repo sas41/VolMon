@@ -3,14 +3,14 @@
   VolMon WiX 4 installer source.
 
   Installs all four binaries + icon to %ProgramFiles%\VolMon\, then runs
-  register.ps1 as the current user (via a deferred custom action that
-  impersonates the logged-on user) to register Task Scheduler tasks and
-  startup shortcuts.
+  register.ps1 as the current user (via a deferred+impersonated ExeCommand
+  custom action) to register Task Scheduler tasks and startup shortcuts.
 
   Build command (called from the CI workflow):
     wix build volmon.wxs \
       -d SourceDir=<path-to-publish/win-x64> \
       -d Version=<semver> \
+      -arch x64 \
       -o VolMon-win-x64.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
@@ -71,24 +71,19 @@
     <!--
       ── Post-install: run register.ps1 as the current user ──────────
 
-      WiX deferred custom actions run as SYSTEM; to register Task
-      Scheduler AtLogOn tasks and Startup shortcuts for the installing
-      user we must impersonate them. We use a Type 34 (exe) action with
-      Impersonate="yes" so it runs under the logged-on user's token.
+      ExeCommand custom actions (Type 34 in MSI terms) launch an
+      executable directly — no extension DLL required. Impersonate="yes"
+      ensures the action runs under the installing user's token rather
+      than SYSTEM, which is required for Task Scheduler AtLogOn tasks
+      and per-user Startup folder shortcuts.
 
-      PowerShell is invoked with -NonInteractive -WindowStyle Hidden so
-      no console window appears during the MSI install UI.
+      PowerShell is invoked with -WindowStyle Hidden so no console
+      window flashes during the MSI install UI.
     -->
-    <SetProperty
-      Id="RunRegister"
-      Value="&quot;[%ComSpec]&quot; /c powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]register.ps1&quot;"
-      Before="RunRegister"
-      Sequence="execute" />
-
     <CustomAction
       Id="RunRegister"
-      BinaryRef="Wix4UtilCA_X64"
-      DllEntry="WixQuietExec64"
+      ExeCommand="powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]register.ps1&quot;"
+      Directory="INSTALLFOLDER"
       Execute="deferred"
       Impersonate="yes"
       Return="ignore" />
@@ -97,16 +92,10 @@
       On uninstall, run register.ps1 -Unregister to clean up tasks and
       shortcuts before files are removed.
     -->
-    <SetProperty
-      Id="RunUnregister"
-      Value="&quot;[%ComSpec]&quot; /c powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]register.ps1&quot; -Unregister"
-      Before="RunUnregister"
-      Sequence="execute" />
-
     <CustomAction
       Id="RunUnregister"
-      BinaryRef="Wix4UtilCA_X64"
-      DllEntry="WixQuietExec64"
+      ExeCommand="powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]register.ps1&quot; -Unregister"
+      Directory="INSTALLFOLDER"
       Execute="deferred"
       Impersonate="yes"
       Return="ignore" />

@@ -6,6 +6,10 @@
   register.ps1 as the current user (via a deferred+impersonated ExeCommand
   custom action) to register Task Scheduler tasks and startup shortcuts.
 
+  The installer presents two features:
+    - VolMon (required) — daemon + GUI
+    - Hardware Support (optional, default off) — hardware daemon + hardware GUI
+
   Build command (called from the CI workflow):
     wix build volmon.wxs \
       -d SourceDir=<path-to-publish/win-x64> \
@@ -29,13 +33,17 @@
 
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- Show the feature-selection dialog so the user can opt in to hardware support -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <UIRef Id="WixUI_FeatureTree" />
+
     <!-- ── Install directory ──────────────────────────────────────── -->
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="VolMon" />
     </StandardDirectory>
 
-    <!-- ── Files ─────────────────────────────────────────────────── -->
-    <ComponentGroup Id="MainFiles" Directory="INSTALLFOLDER">
+    <!-- ── Core files ────────────────────────────────────────────── -->
+    <ComponentGroup Id="CoreFiles" Directory="INSTALLFOLDER">
 
       <Component Id="DaemonExe" Guid="A1B2C3D4-E5F6-7A8B-9C0D-E1F2A3B4C5D6">
         <File Id="VolMonDaemon" Source="$(SourceDir)\VolMon.Daemon.exe" KeyPath="yes" />
@@ -43,14 +51,6 @@
 
       <Component Id="GuiExe" Guid="B2C3D4E5-F6A7-8B9C-0D1E-F2A3B4C5D6E7">
         <File Id="VolMonGUI" Source="$(SourceDir)\VolMon.GUI.exe" KeyPath="yes" />
-      </Component>
-
-      <Component Id="HardwareExe" Guid="C3D4E5F6-A7B8-9C0D-1E2F-A3B4C5D6E7F8">
-        <File Id="VolMonHardware" Source="$(SourceDir)\VolMon.Hardware.exe" KeyPath="yes" />
-      </Component>
-
-      <Component Id="HardwareGuiExe" Guid="D4E5F6A7-B8C9-0D1E-2F3A-B4C5D6E7F8A9">
-        <File Id="VolMonHardwareGUI" Source="$(SourceDir)\VolMon.HardwareGUI.exe" KeyPath="yes" />
       </Component>
 
       <Component Id="RegisterScript" Guid="E5F6A7B8-C9D0-1E2F-3A4B-C5D6E7F8A9B0">
@@ -63,23 +63,54 @@
 
     </ComponentGroup>
 
-    <!-- ── Feature ───────────────────────────────────────────────── -->
-    <Feature Id="ProductFeature" Title="VolMon" Level="1">
-      <ComponentGroupRef Id="MainFiles" />
+    <!-- ── Hardware files (optional feature) ─────────────────────── -->
+    <ComponentGroup Id="HardwareFiles" Directory="INSTALLFOLDER">
+
+      <Component Id="HardwareExe" Guid="C3D4E5F6-A7B8-9C0D-1E2F-A3B4C5D6E7F8">
+        <File Id="VolMonHardware" Source="$(SourceDir)\VolMon.Hardware.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="HardwareGuiExe" Guid="D4E5F6A7-B8C9-0D1E-2F3A-B4C5D6E7F8A9">
+        <File Id="VolMonHardwareGUI" Source="$(SourceDir)\VolMon.HardwareGUI.exe" KeyPath="yes" />
+      </Component>
+
+    </ComponentGroup>
+
+    <!-- ── Features ──────────────────────────────────────────────── -->
+    <Feature Id="CoreFeature"
+             Title="VolMon"
+             Description="Volume group daemon and GUI. Required."
+             Level="1"
+             Absent="disallow"
+             Display="expand">
+      <ComponentGroupRef Id="CoreFiles" />
+
+      <Feature Id="HardwareFeature"
+               Title="Hardware Support"
+               Description="Hardware daemon and GUI for USB volume controllers (e.g. Beacn Mix). Only needed if you own a supported device."
+               Level="2">
+        <ComponentGroupRef Id="HardwareFiles" />
+      </Feature>
     </Feature>
 
     <!--
-      ── Post-install: run register.ps1 as the current user ──────────
+      ── Post-install custom actions ──────────────────────────────────
 
-      ExeCommand custom actions (Type 34 in MSI terms) launch an
-      executable directly — no extension DLL required. Impersonate="yes"
-      ensures the action runs under the installing user's token rather
-      than SYSTEM, which is required for Task Scheduler AtLogOn tasks
-      and per-user Startup folder shortcuts.
+      ExeCommand custom actions (Type 34) launch an executable directly —
+      no extension DLL required. Impersonate="yes" ensures the action runs
+      under the installing user's token rather than SYSTEM, which is
+      required for Task Scheduler AtLogOn tasks and per-user Startup folder
+      shortcuts. PowerShell is invoked with -WindowStyle Hidden so no
+      console window flashes during the installer UI.
 
-      PowerShell is invoked with -WindowStyle Hidden so no console
-      window flashes during the MSI install UI.
+      Four actions cover the matrix of install/uninstall × with/without hardware:
+        RunRegister          — core only (hardware feature not selected)
+        RunRegisterHardware  — core + hardware (hardware feature selected)
+        RunUnregister        — unregister core (hardware feature was not installed)
+        RunUnregisterHardware — unregister core + hardware (hardware feature was installed)
     -->
+
+    <!-- Install: core only -->
     <CustomAction
       Id="RunRegister"
       ExeCommand="powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]register.ps1&quot;"
@@ -88,10 +119,16 @@
       Impersonate="yes"
       Return="ignore" />
 
-    <!--
-      On uninstall, run register.ps1 -Unregister to clean up tasks and
-      shortcuts before files are removed.
-    -->
+    <!-- Install: core + hardware -->
+    <CustomAction
+      Id="RunRegisterHardware"
+      ExeCommand="powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]register.ps1&quot; -IncludeHardware"
+      Directory="INSTALLFOLDER"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="ignore" />
+
+    <!-- Uninstall: core only -->
     <CustomAction
       Id="RunUnregister"
       ExeCommand="powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]register.ps1&quot; -Unregister"
@@ -100,11 +137,27 @@
       Impersonate="yes"
       Return="ignore" />
 
+    <!-- Uninstall: core + hardware -->
+    <CustomAction
+      Id="RunUnregisterHardware"
+      ExeCommand="powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]register.ps1&quot; -Unregister -IncludeHardware"
+      Directory="INSTALLFOLDER"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="ignore" />
+
     <InstallExecuteSequence>
-      <!-- Register after files are installed -->
-      <Custom Action="RunRegister"   After="InstallFiles"  Condition="NOT Installed" />
-      <!-- Unregister before files are removed -->
-      <Custom Action="RunUnregister" Before="RemoveFiles"  Condition="Installed AND NOT UPGRADINGPRODUCTCODE" />
+      <!-- Register after files are installed; branch on whether hardware feature is selected -->
+      <Custom Action="RunRegisterHardware" After="InstallFiles"
+              Condition="NOT Installed AND &amp;HardwareFeature=3" />
+      <Custom Action="RunRegister"         After="InstallFiles"
+              Condition="NOT Installed AND NOT &amp;HardwareFeature=3" />
+
+      <!-- Unregister before files are removed; branch on whether hardware feature was installed -->
+      <Custom Action="RunUnregisterHardware" Before="RemoveFiles"
+              Condition="Installed AND NOT UPGRADINGPRODUCTCODE AND !HardwareFeature=3" />
+      <Custom Action="RunUnregister"         Before="RemoveFiles"
+              Condition="Installed AND NOT UPGRADINGPRODUCTCODE AND NOT !HardwareFeature=3" />
     </InstallExecuteSequence>
 
   </Package>

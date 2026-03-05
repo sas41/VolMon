@@ -4,16 +4,13 @@ A cross-platform utility for grouping applications by audio stream and
 controlling their volumes as a group. Works with PulseAudio/PipeWire on Linux,
 Core Audio (WASAPI) on Windows, and CoreAudio HAL on macOS.
 
-VolMon does **not** create virtual audio devices or channels. It sets per-stream
-volumes natively through the system audio server.
-
 ## Features
 
 - **Group applications** by process name or audio class (supports glob patterns)
 - **Set group volumes** — all apps in a group share the same volume
 - **Auto-apply** — new audio streams are automatically matched and configured
-- **CLI + GUI** — manage groups from the terminal or a system tray app
-- **Daemon** — background service ensures volumes are applied even without the GUI
+- **GUI** — manage groups from the GUI, minimizes to tray
+- **Daemon** — background service ensures volumes are applied even without the GUI open
 - **Hardware control** — physical USB controllers (dials, buttons, displays) for hands-on volume management
 - **Hardware GUI** — configure and manage hardware devices, install the hardware daemon as a service
 - **KDE/GNOME/Windows/macOS** — GUI uses Avalonia UI for cross-platform tray support
@@ -31,112 +28,110 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md)
 
 ## Install
 
-### Prerequisites
+Download the release for your platform from the [Releases](../../releases) page.
+Binaries are self-contained — no .NET runtime required.
 
-- [.NET 10 SDK](https://dotnet.microsoft.com/download) or later
-- Linux: PulseAudio or PipeWire (with PulseAudio compatibility)
-- Linux: `libusb-1.0` (for hardware daemon USB communication)
-- Optional: ImageMagick (only needed if regenerating icons from SVG)
+### Linux
 
-### Linux (recommended)
+Prerequisites: PulseAudio or PipeWire, and `libusb-1.0` if you use hardware devices.
 
-The install script builds, publishes, and sets up everything:
+Extract the zip to a permanent location, then run the registration script:
 
 ```bash
-./install/install.sh
+unzip VolMon-linux-x64.zip -d ~/.local/lib/volmon
+cd ~/.local/lib/volmon
+chmod +x register.sh
+./register.sh
 ```
 
-This will:
-- Publish self-contained binaries for all 5 projects (daemon, GUI, CLI, hardware daemon, hardware GUI)
-- Install them to `~/.local/bin/` (`volmon-daemon`, `volmon-gui`, `volmon`, `volmon-hardware`, `volmon-hardware-gui`)
-- Install and enable systemd user services for both daemons (auto-start)
-- Install desktop entries and icon for your app launcher
+`register.sh` registers the daemon as a systemd user service, adds the GUI to
+autostart, and installs desktop entries and the icon. The daemon starts immediately.
 
-After installation:
+To also register the hardware daemon and hardware GUI:
 
 ```bash
-volmon-gui              # Launch the volume group GUI
-volmon --help           # CLI usage
-volmon-hardware-gui     # Launch the hardware configuration GUI
-systemctl --user status volmon            # Check daemon status
-systemctl --user status volmon-hardware   # Check hardware daemon status
+./register.sh --include-hardware
 ```
 
-> **Note:** Make sure `~/.local/bin` is in your PATH. Most distributions
-> include it by default. If not, add `export PATH="$HOME/.local/bin:$PATH"`
-> to your shell profile.
-
-### Uninstall
+To unregister everything (stops services, removes all entries and the icon):
 
 ```bash
-./install/install.sh --uninstall
+./register.sh --unregister
 ```
 
-This stops both daemons, removes systemd services, desktop entries, icon, and
-all installed binaries.
+### Windows
 
-### Development (run from source)
+**With the installer:** run `VolMon-win-x64.msi`. The installer lets you choose
+whether to include hardware support during setup. Files are installed to
+`%ProgramFiles%\VolMon\` and services are registered automatically. Uninstalling
+via Add/Remove Programs cleans everything up.
+
+**Without the installer:** extract the zip to a permanent location (e.g.
+`C:\Program Files\VolMon\`) and run from that folder in PowerShell:
+
+```powershell
+.\register.ps1                   # core daemon + GUI
+.\register.ps1 -IncludeHardware  # also register hardware daemon + hardware GUI
+.\register.ps1 -Unregister       # remove all tasks and shortcuts
+```
+
+### macOS
+
+> **Untested.** The macOS build is compiled and packaged in CI but has not been
+> run on a real Mac. Proceed with caution and please report any issues.
+
+**With the installer:** run `VolMon-osx-x64.pkg`. The installer will ask whether
+to include hardware support. Files are installed to `/usr/local/lib/volmon/`, a
+`VolMon.app` bundle is created in `~/Applications/`, and launchd user agents are
+registered for the daemon and GUI.
+
+**Without the installer:** extract the zip to a permanent location, then:
 
 ```bash
-# Build all projects
-dotnet build
-
-# Start the daemon
-dotnet run --project src/VolMon.Daemon
-
-# In another terminal, start the GUI
-dotnet run --project src/VolMon.GUI
-
-# Start the hardware daemon (requires a connected USB device)
-dotnet run --project src/VolMon.Hardware
-
-# Start the hardware configuration GUI
-dotnet run --project src/VolMon.HardwareGUI
-
-# Or use VS Code — launch the "Daemon+GUI" compound configuration
+sudo mkdir -p /usr/local/lib/volmon
+sudo cp -R VolMon-osx-x64/. /usr/local/lib/volmon/
+chmod +x /usr/local/lib/volmon/register.sh
+/usr/local/lib/volmon/register.sh
 ```
-
-## CLI Usage
 
 ```bash
-# Check daemon status
-volmon status
-
-# Add a default group (catches all unmatched programs)
-volmon add-group Default --default
-
-# Add a group with volume
-volmon add-group Music 80
-
-# Add programs to the group
-volmon add-program Music spotify
-volmon add-program Music rhythmbox
-
-# Add a device (e.g. microphone) to a group
-volmon add-device Comms alsa_input.pci-0000_00_1f.3.analog-stereo
-
-# List groups
-volmon groups
-
-# List active streams and devices
-volmon streams
-volmon devices
-
-# Set volume
-volmon set-volume Music 50
-
-# Mute/unmute
-volmon mute Music
-volmon unmute Music
+./register.sh                    # core daemon + GUI
+./register.sh --include-hardware # also register hardware daemon + hardware GUI
+./register.sh --unregister       # unload agents and remove .app bundles
 ```
 
-## GUI
+---
+
+For building from source, see [DEVELOPMENT.md](./DEVELOPMENT.md).
+
+## Running
+
+After installation the daemon and GUI start automatically on login. To start them
+manually:
+
+### Linux
 
 ```bash
-volmon-gui
+systemctl --user start volmon       # start the daemon
+volmon-gui                          # start the GUI
+volmon-hardware-gui                 # start the hardware configuration GUI (if installed)
 ```
 
-The GUI runs as a system tray icon. Click it to open the volume group editor.
+### Windows
+
+The daemon runs as a Task Scheduler task. To start it manually, open Task Scheduler
+and run the **VolMon Daemon** task, or launch `VolMon.Daemon.exe` directly from
+`%ProgramFiles%\VolMon\`. The GUI can be launched from the Start Menu shortcut or
+by running `VolMon.GUI.exe`.
+
+### macOS
+
+> **Untested.** See the macOS note in the Install section.
+
+```bash
+launchctl start com.volmon.daemon   # start the daemon
+open -a VolMon                      # start the GUI
+```
 
 ## Hardware
 
@@ -152,12 +147,12 @@ for the Beacn Mix USB protocol documentation.
 
 ### Hardware Config
 
-Hardware configuration lives alongside the main config:
+Hardware configuration lives alongside the main config in the same platform folder:
 
 | File | Purpose |
 |---|---|
-| `~/.config/volmon/hardware.json` | Master config — lists all known devices, enabled/disabled state |
-| `~/.config/volmon/beacn-mix-{serial}.json` | Per-device config — display brightness, layout, volume step, timeouts |
+| `hardware.json` | Master config — lists all known devices, enabled/disabled state |
+| `beacn-mix-{serial}.json` | Per-device config — display brightness, layout, volume step, timeouts |
 
 New devices are detected automatically and added to `hardware.json` as
 **disabled** by default. Use the Hardware GUI or edit the file directly to
@@ -165,7 +160,15 @@ enable them.
 
 ## Config
 
-Config is stored at `~/.config/volmon/config.json`:
+Config files are stored in a platform-specific folder:
+
+| Platform | Config folder |
+|---|---|
+| Linux | `~/.config/volmon/` |
+| Windows | `%APPDATA%\volmon\` |
+| macOS | `~/Library/Application Support/volmon/` |
+
+The main config file is `config.json` inside that folder. Example:
 
 ```json
 {
@@ -201,7 +204,7 @@ Config is stored at `~/.config/volmon/config.json`:
 ### Group fields
 
 - **programs** — list of process binary names. Matching is case-insensitive.
-- **devices** — list of PulseAudio sink/source names (use `volmon devices` to find them).
+- **devices** — list of audio device backend names. These are shown in the GUI's device pool.
 - **isDefault** — one group should be default. Unrecognized programs go here automatically.
 - New hardware devices are **never** auto-assigned. Add them explicitly.
 

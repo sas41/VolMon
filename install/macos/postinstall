@@ -29,7 +29,24 @@ chmod +x \
     "$INSTALL_DIR/VolMon.HardwareGUI" \
     "$INSTALL_DIR/register.sh"
 
+# Ask whether to include hardware support via a native macOS dialog.
+# osascript must run as the console user to be able to display a GUI dialog.
+INCLUDE_HARDWARE=false
+
+DIALOG_RESULT=$(launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
+    osascript -e 'button returned of (display dialog "Do you want to register hardware support?\n\nThis sets up the hardware daemon and Hardware Manager GUI for USB volume controllers (e.g. Beacn Mix). Only needed if you own a supported device." buttons {"No", "Yes"} default button "No" with title "VolMon" with icon note)' \
+    2>/dev/null || echo "No")
+
+if [[ "$DIALOG_RESULT" == "Yes" ]]; then
+    INCLUDE_HARDWARE=true
+fi
+
 # Run register.sh as the console user so launchd agents and .app
 # bundles are created in that user's home directory.
-launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
-    bash "$INSTALL_DIR/register.sh"
+if $INCLUDE_HARDWARE; then
+    launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
+        bash "$INSTALL_DIR/register.sh" --include-hardware
+else
+    launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
+        bash "$INSTALL_DIR/register.sh"
+fi

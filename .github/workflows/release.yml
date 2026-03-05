@@ -159,7 +159,7 @@ jobs:
       - name: Generate release tag
         id: tag
         run: |
-          TAG="v$(date -u +'%Y.%m.%d')-$(git rev-parse --short HEAD)"
+          TAG="v$(date -u +'%Y-%m-%d')-$(git rev-parse --short HEAD)"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release

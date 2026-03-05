@@ -34,6 +34,16 @@ public sealed class StreamWatcher : IDisposable
     private readonly Dictionary<Guid, VirtualSinkInfo> _virtualSinks = [];
 
     /// <summary>
+    /// IDs of streams that have been explicitly moved to a virtual sink by VolMon.
+    /// Used to determine whether a stream needs to be moved back to <c>@DEFAULT_SINK@</c>
+    /// when its group switches from Compatibility to Direct mode, or when it is unassigned.
+    /// Without this, every Direct-mode group assignment would unconditionally call
+    /// <c>MoveStreamToSinkAsync(@DEFAULT_SINK@)</c>, even for programs that were never
+    /// in a Compatibility group and are already on the correct output.
+    /// </summary>
+    private readonly HashSet<string> _streamsOnVirtualSinks = [];
+
+    /// <summary>
     /// Last snapshot of running configured process names, used to detect
     /// process start/quit without audio streams.
     /// </summary>
@@ -319,6 +329,7 @@ public sealed class StreamWatcher : IDisposable
                 try
                 {
                     await _backend.MoveStreamToSinkAsync(stream.Id, "@DEFAULT_SINK@", ct);
+                    _streamsOnVirtualSinks.Remove(stream.Id);
                 }
                 catch (Exception ex)
                 {
@@ -364,6 +375,7 @@ public sealed class StreamWatcher : IDisposable
     {
         if (_activeStreams.Remove(e.StreamId))
         {
+            _streamsOnVirtualSinks.Remove(e.StreamId);
             _logger.LogInformation("Stream removed: {StreamId}", e.StreamId);
             RaiseStateChanged();
         }
@@ -519,10 +531,14 @@ public sealed class StreamWatcher : IDisposable
             }
             else
             {
-                // If this stream was previously routed to a virtual sink (e.g. it was
-                // just removed from a Compatibility group), move it back to the default
-                // output sink before applying direct volume control.
-                await _backend.MoveStreamToSinkAsync(stream.Id, "@DEFAULT_SINK@", ct);
+                // Only move back to the default output sink if VolMon previously routed
+                // this stream to a virtual sink (e.g. the group was just switched from
+                // Compatibility to Direct). Streams that were never on a virtual sink are
+                // already on the correct output and must not be touched — doing so
+                // unconditionally would reassign programs to the default output even when
+                // they are not in a Compatibility-enabled group.
+                if (_streamsOnVirtualSinks.Remove(stream.Id))
+                    await _backend.MoveStreamToSinkAsync(stream.Id, "@DEFAULT_SINK@", ct);
 
                 await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
                 await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
@@ -658,6 +674,7 @@ public sealed class StreamWatcher : IDisposable
         try
         {
             await _backend.MoveStreamToSinkAsync(stream.Id, vsink.SinkName, ct);
+            _streamsOnVirtualSinks.Add(stream.Id);
         }
         catch (Exception ex)
         {
@@ -688,6 +705,7 @@ public sealed class StreamWatcher : IDisposable
                     // "@DEFAULT_SINK@" is a PulseAudio magic name that always resolves
                     // to the current default output sink.
                     await _backend.MoveStreamToSinkAsync(stream.Id, "@DEFAULT_SINK@", ct);
+                    _streamsOnVirtualSinks.Remove(stream.Id);
                 }
                 catch (Exception ex)
                 {

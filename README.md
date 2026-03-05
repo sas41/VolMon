@@ -145,6 +145,15 @@ open -a VolMon                      # start the GUI
 
 ## Hardware
 
+**Disclaimer:** VolMon's hardware daemon doesn't require or install new firmware,
+it's out of scope for this project to include that, if the hardware cannot be
+supported out of the box, a different project might provide a more open firmware.
+However, regardless if your hardware is supported or not, we cannot provide any
+support or guarantees, especially if you use other software that interfaces with
+your hardware such as it's official software for a given operating system.
+
+_**Please use resopnsibly and AT YOUR OWN RISK!**_
+
 The hardware daemon (`VolMon.Hardware`) connects to USB controllers and bridges
 them to the VolMon daemon via IPC. Each physical dial maps to a volume group,
 dial rotation changes volume, and dial button press toggles mute. Devices with

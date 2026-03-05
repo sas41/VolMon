@@ -35,8 +35,7 @@
     <MediaTemplate EmbedCab="yes" />
 
     <!-- Show the feature-selection dialog so the user can opt in to hardware support -->
-    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
-    <UIRef Id="WixUI_FeatureTree" />
+    <ui:WixUI Id="WixUI_FeatureTree" />
 
     <!-- ── Install directory ──────────────────────────────────────── -->
     <StandardDirectory Id="ProgramFiles64Folder">

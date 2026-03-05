@@ -94,11 +94,18 @@ jobs:
       - name: Generate version string
         id: version
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # MSI requires a numeric Major.Minor.Patch.Build version.
-          # Use today's date as Major.Minor.Patch (YYYY.MMDD.0) so it is
-          # always increasing and satisfies WiX's version constraints.
-          $v = (Get-Date -Format 'yyyy.MMdd.0')
+          # Count how many workflow runs have completed today (UTC) for this workflow.
+          # That count becomes the daily build index, giving YY.MM.DDxxx.
+          $today    = (Get-Date -Format 'yyyy-MM-dd')
+          $repoSlug = "${{ github.repository }}"
+          $runs     = gh api "repos/$repoSlug/actions/workflows/release.yml/runs?per_page=100&created=>=$today" `
+                        --jq '.workflow_runs | length'
+          $idx      = [int]$runs
+          $datePart = (Get-Date -Format 'yy.MM.dd')
+          $v        = "$datePart$($idx.ToString('000'))"
           echo "msi_version=$v" >> $env:GITHUB_OUTPUT
 
       - name: Build MSI

@@ -4,9 +4,10 @@
     VolMon registration script for Windows.
 
 .DESCRIPTION
-    Registers the daemon as a Windows Task Scheduler task that runs at
-    logon (hidden, auto-restart on failure) and places a shortcut to the
-    GUI in the user's Startup folder so it launches on login.
+    Registers the daemon as a hidden Windows Task Scheduler task that runs at
+    logon (auto-restart on failure), places shortcuts to the GUI in the Startup
+    folder, Start Menu, and Desktop so they launch on login and are discoverable,
+    and creates Start Menu / Desktop shortcuts for the GUI applications.
 
     Optionally registers the hardware daemon and hardware GUI when
     -IncludeHardware is passed.
@@ -42,8 +43,13 @@ $IconFile         = Join-Path $ScriptDir 'volmon.ico'
 $TaskName         = 'VolMon Daemon'
 $HardwareTaskName = 'VolMon Hardware Daemon'
 $StartupDir       = [Environment]::GetFolderPath('Startup')
-$GuiShortcut      = Join-Path $StartupDir 'VolMon GUI.lnk'
-$HwGuiShortcut    = Join-Path $StartupDir 'VolMon Hardware Manager.lnk'
+$DesktopDir       = [Environment]::GetFolderPath('Desktop')
+$StartMenuDir     = Join-Path ([Environment]::GetFolderPath('Programs')) 'VolMon'
+$GuiStartup       = Join-Path $StartupDir   'VolMon.lnk'
+$GuiDesktop       = Join-Path $DesktopDir   'VolMon.lnk'
+$GuiStartMenu     = Join-Path $StartMenuDir 'VolMon.lnk'
+$HwGuiDesktop     = Join-Path $DesktopDir   'VolMon Hardware Manager.lnk'
+$HwGuiStartMenu   = Join-Path $StartMenuDir 'VolMon Hardware Manager.lnk'
 
 # ── Unregister ────────────────────────────────────────────────────────
 if ($Unregister) {
@@ -61,12 +67,17 @@ if ($Unregister) {
         }
     }
 
-    # Remove startup shortcuts
-    foreach ($path in @($GuiShortcut, $HwGuiShortcut)) {
+    # Remove all shortcuts (startup, desktop, start menu)
+    $allShortcuts = @($GuiStartup, $GuiDesktop, $GuiStartMenu, $HwGuiDesktop, $HwGuiStartMenu)
+    foreach ($path in $allShortcuts) {
         if (Test-Path $path) {
             Remove-Item $path -Force
-            Write-Host "  Shortcut removed: $(Split-Path -Leaf $path)" -ForegroundColor Green
+            Write-Host "  Shortcut removed: $path" -ForegroundColor Green
         }
+    }
+    # Remove Start Menu folder if empty
+    if ((Test-Path $StartMenuDir) -and (Get-ChildItem $StartMenuDir -ErrorAction SilentlyContinue).Count -eq 0) {
+        Remove-Item $StartMenuDir -Force
     }
 
     Write-Host "`nVolMon unregistered." -ForegroundColor Green
@@ -102,7 +113,12 @@ function Register-DaemonTask {
         Unregister-ScheduledTask -TaskName $Name -Confirm:$false
     }
 
-    $action  = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $ScriptDir
+    # Wrap the daemon in powershell -WindowStyle Hidden so no console window
+    # appears when the task fires at logon.
+    $action  = New-ScheduledTaskAction `
+        -Execute 'powershell.exe' `
+        -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"& '$ExePath'`"" `
+        -WorkingDirectory $ScriptDir
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
@@ -157,18 +173,20 @@ if ($IncludeHardware) {
         -Description 'VolMon Hardware Daemon'
 }
 
-# ── GUI: Startup folder shortcut ─────────────────────────────────────
-Write-Host 'Installing GUI startup shortcut...' -ForegroundColor Cyan
-New-StartupShortcut -ShortcutPath $GuiShortcut -TargetExe $GuiExe `
-    -Description 'VolMon Volume Monitoring and Control'
-Write-Host '  GUI will start automatically on next login.' -ForegroundColor Green
+# ── GUI: Startup, Desktop, and Start Menu shortcuts ──────────────────
+Write-Host 'Installing GUI shortcuts...' -ForegroundColor Cyan
+New-Item -ItemType Directory -Path $StartMenuDir -Force | Out-Null
+New-StartupShortcut -ShortcutPath $GuiStartup   -TargetExe $GuiExe -Description 'VolMon Volume Monitoring and Control'
+New-StartupShortcut -ShortcutPath $GuiDesktop   -TargetExe $GuiExe -Description 'VolMon Volume Monitoring and Control'
+New-StartupShortcut -ShortcutPath $GuiStartMenu -TargetExe $GuiExe -Description 'VolMon Volume Monitoring and Control'
+Write-Host '  GUI shortcuts installed (Startup, Desktop, Start Menu).' -ForegroundColor Green
 
-# ── Hardware GUI: Startup folder shortcut (optional) ─────────────────
+# ── Hardware GUI: Desktop and Start Menu shortcuts (optional) ─────────
 if ($IncludeHardware) {
-    Write-Host 'Installing Hardware GUI startup shortcut...' -ForegroundColor Cyan
-    New-StartupShortcut -ShortcutPath $HwGuiShortcut -TargetExe $HardwareGuiExe `
-        -Description 'VolMon Hardware Device Manager'
-    Write-Host '  Hardware GUI will start automatically on next login.' -ForegroundColor Green
+    Write-Host 'Installing Hardware GUI shortcuts...' -ForegroundColor Cyan
+    New-StartupShortcut -ShortcutPath $HwGuiDesktop   -TargetExe $HardwareGuiExe -Description 'VolMon Hardware Device Manager'
+    New-StartupShortcut -ShortcutPath $HwGuiStartMenu -TargetExe $HardwareGuiExe -Description 'VolMon Hardware Device Manager'
+    Write-Host '  Hardware GUI shortcuts installed (Desktop, Start Menu).' -ForegroundColor Green
 }
 
 # ── Done ──────────────────────────────────────────────────────────────
@@ -179,7 +197,7 @@ Write-Host "  Daemon task:    Get-ScheduledTask -TaskName '$TaskName'"
 if ($IncludeHardware) {
     Write-Host "  Hardware task:  Get-ScheduledTask -TaskName '$HardwareTaskName'"
 }
-Write-Host "  Start GUI:      $GuiExe"
+Write-Host "  Start GUI:      $GuiExe  (also on Desktop and Start Menu)"
 if ($IncludeHardware) {
     Write-Host "  Hardware GUI:   $HardwareGuiExe"
 }

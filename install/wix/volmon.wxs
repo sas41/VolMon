@@ -113,9 +113,9 @@
 
     <InstallExecuteSequence>
       <!-- Register after files are installed -->
-      <Custom Action="RunRegister"   After="InstallFiles">NOT Installed</Custom>
+      <Custom Action="RunRegister"   After="InstallFiles"  Condition="NOT Installed" />
       <!-- Unregister before files are removed -->
-      <Custom Action="RunUnregister" Before="RemoveFiles">Installed AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="RunUnregister" Before="RemoveFiles"  Condition="Installed AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 
   </Package>

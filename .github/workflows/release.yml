@@ -85,11 +85,11 @@ jobs:
 
       - name: Install WiX toolset
         shell: pwsh
-        run: dotnet tool install --global wix
+        run: dotnet tool install --global wix --version 6.0.2
 
       - name: Add WiX extensions
         shell: pwsh
-        run: wix extension add WixToolset.Util.wixext
+        run: wix extension add WixToolset.Util.wixext/6.0.2
 
       - name: Generate version string
         id: version

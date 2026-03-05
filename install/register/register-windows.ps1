@@ -113,12 +113,7 @@ function Register-DaemonTask {
         Unregister-ScheduledTask -TaskName $Name -Confirm:$false
     }
 
-    # Wrap the daemon in powershell -WindowStyle Hidden so no console window
-    # appears when the task fires at logon.
-    $action  = New-ScheduledTaskAction `
-        -Execute 'powershell.exe' `
-        -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"& '$ExePath'`"" `
-        -WorkingDirectory $ScriptDir
+    $action  = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $ScriptDir
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `

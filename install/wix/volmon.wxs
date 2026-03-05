@@ -81,7 +81,7 @@
              Title="VolMon"
              Description="Volume group daemon and GUI. Required."
              Level="1"
-             Absent="disallow"
+             AllowAbsent="no"
              Display="expand">
       <ComponentGroupRef Id="CoreFiles" />
 

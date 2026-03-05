@@ -29,24 +29,46 @@ chmod +x \
     "$INSTALL_DIR/VolMon.HardwareGUI" \
     "$INSTALL_DIR/register.sh"
 
-# Ask whether to include hardware support via a native macOS dialog.
-# osascript must run as the console user to be able to display a GUI dialog.
-INCLUDE_HARDWARE=false
+# Detect whether this is a fresh install or an upgrade by checking if the
+# daemon launchd agent already exists for the console user.
+LAUNCH_AGENTS="/Users/$CONSOLE_USER/Library/LaunchAgents"
+IS_UPGRADE=false
+HARDWARE_WAS_REGISTERED=false
 
-DIALOG_RESULT=$(launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
-    osascript -e 'button returned of (display dialog "Do you want to register hardware support?\n\nThis sets up the hardware daemon and Hardware Manager GUI for USB volume controllers (e.g. Beacn Mix). Only needed if you own a supported device." buttons {"No", "Yes"} default button "No" with title "VolMon" with icon note)' \
-    2>/dev/null || echo "No")
-
-if [[ "$DIALOG_RESULT" == "Yes" ]]; then
-    INCLUDE_HARDWARE=true
+if [[ -f "$LAUNCH_AGENTS/com.volmon.daemon.plist" ]]; then
+    IS_UPGRADE=true
+fi
+if [[ -f "$LAUNCH_AGENTS/com.volmon.hardware.plist" ]]; then
+    HARDWARE_WAS_REGISTERED=true
 fi
 
-# Run register.sh as the console user so launchd agents and .app
-# bundles are created in that user's home directory.
-if $INCLUDE_HARDWARE; then
-    launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
-        bash "$INSTALL_DIR/register.sh" --include-hardware
+if $IS_UPGRADE; then
+    # Upgrade: re-register with the same hardware choice as before, no dialog.
+    if $HARDWARE_WAS_REGISTERED; then
+        launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
+            bash "$INSTALL_DIR/register.sh" --include-hardware
+    else
+        launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
+            bash "$INSTALL_DIR/register.sh"
+    fi
 else
-    launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
-        bash "$INSTALL_DIR/register.sh"
+    # Fresh install: ask whether to include hardware support via a native dialog.
+    # osascript must run as the console user to display a GUI dialog.
+    INCLUDE_HARDWARE=false
+
+    DIALOG_RESULT=$(launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
+        osascript -e 'button returned of (display dialog "Do you want to register hardware support?\n\nThis sets up the hardware daemon and Hardware Manager GUI for USB volume controllers (e.g. Beacn Mix). Only needed if you own a supported device." buttons {"No", "Yes"} default button "No" with title "VolMon" with icon note)' \
+        2>/dev/null || echo "No")
+
+    if [[ "$DIALOG_RESULT" == "Yes" ]]; then
+        INCLUDE_HARDWARE=true
+    fi
+
+    if $INCLUDE_HARDWARE; then
+        launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
+            bash "$INSTALL_DIR/register.sh" --include-hardware
+    else
+        launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
+            bash "$INSTALL_DIR/register.sh"
+    fi
 fi

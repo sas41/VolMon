@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/VolMonLogo.png" alt="VolMon" width="96" />
+</p>
+
 # VolMon
 
 A cross-platform utility for grouping applications by audio stream and
@@ -21,6 +25,12 @@ Core Audio (WASAPI) on Windows, and CoreAudio HAL on macOS.
 |---|---|---|---|---|
 | [Beacn Mix](https://www.beacn.com/pages/beacn-mix) | 4 rotary encoders | 4 dial buttons | 800x480 LCD | Fully supported |
 | Beacn Mix Create | 4 rotary encoders | 4 dial buttons | 800x480 LCD | Detected, untested |
+
+## Screenshots
+
+| Desktop GUI | Hardware Manager | Beacn Mix |
+|---|---|---|
+| ![Desktop GUI](screenshots/DesktopGUI.png) | ![Hardware Manager](screenshots/HardwareGUI.png) | ![Beacn Mix](screenshots/HardwareBeacnMix.jpg) |
 
 ## Architecture
 

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# macOS .pkg postinstall script.
+#
+# pkgbuild runs postinstall as root, so we need to drop down to the
+# actual logged-on console user to run launchctl and create the .app
+# bundles in ~/Applications and ~/Library/LaunchAgents.
+#
+set -euo pipefail
+
+INSTALL_DIR="/usr/local/lib/volmon"
+
+# Determine the logged-on console user (works in installer context).
+CONSOLE_USER=$(stat -f '%Su' /dev/console 2>/dev/null || echo "")
+
+if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
+    echo "postinstall: could not determine console user; skipping auto-registration." >&2
+    echo "Run $INSTALL_DIR/register.sh manually to complete setup." >&2
+    exit 0
+fi
+
+CONSOLE_UID=$(id -u "$CONSOLE_USER")
+
+# Ensure binaries are executable (pkgbuild may strip the bit).
+chmod +x \
+    "$INSTALL_DIR/VolMon.Daemon" \
+    "$INSTALL_DIR/VolMon.GUI" \
+    "$INSTALL_DIR/VolMon.Hardware" \
+    "$INSTALL_DIR/VolMon.HardwareGUI" \
+    "$INSTALL_DIR/register.sh"
+
+# Run register.sh as the console user so launchd agents and .app
+# bundles are created in that user's home directory.
+launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" \
+    bash "$INSTALL_DIR/register.sh"

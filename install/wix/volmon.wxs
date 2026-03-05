@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  VolMon WiX 4 installer source.
+
+  Installs all four binaries + icon to %ProgramFiles%\VolMon\, then runs
+  register.ps1 as the current user (via a deferred custom action that
+  impersonates the logged-on user) to register Task Scheduler tasks and
+  startup shortcuts.
+
+  Build command (called from the CI workflow):
+    wix build volmon.wxs \
+      -d SourceDir=<path-to-publish/win-x64> \
+      -d Version=<semver> \
+      -o VolMon-win-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package
+    Name="VolMon"
+    Manufacturer="VolMon"
+    Version="$(Version)"
+    UpgradeCode="4A8B2C1D-3E4F-5A6B-7C8D-9E0F1A2B3C4D"
+    Scope="perMachine"
+    InstallerVersion="500"
+    Compressed="yes">
+
+    <!-- Always overwrite older versions, remove before upgrading -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of VolMon is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- ── Install directory ──────────────────────────────────────── -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="VolMon" />
+    </StandardDirectory>
+
+    <!-- ── Files ─────────────────────────────────────────────────── -->
+    <ComponentGroup Id="MainFiles" Directory="INSTALLFOLDER">
+
+      <Component Id="DaemonExe" Guid="A1B2C3D4-E5F6-7A8B-9C0D-E1F2A3B4C5D6">
+        <File Id="VolMonDaemon" Source="$(SourceDir)\VolMon.Daemon.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="GuiExe" Guid="B2C3D4E5-F6A7-8B9C-0D1E-F2A3B4C5D6E7">
+        <File Id="VolMonGUI" Source="$(SourceDir)\VolMon.GUI.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="HardwareExe" Guid="C3D4E5F6-A7B8-9C0D-1E2F-A3B4C5D6E7F8">
+        <File Id="VolMonHardware" Source="$(SourceDir)\VolMon.Hardware.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="HardwareGuiExe" Guid="D4E5F6A7-B8C9-0D1E-2F3A-B4C5D6E7F8A9">
+        <File Id="VolMonHardwareGUI" Source="$(SourceDir)\VolMon.HardwareGUI.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="RegisterScript" Guid="E5F6A7B8-C9D0-1E2F-3A4B-C5D6E7F8A9B0">
+        <File Id="RegisterPs1" Source="$(SourceDir)\register.ps1" KeyPath="yes" />
+      </Component>
+
+      <Component Id="IconFile" Guid="F6A7B8C9-D0E1-2F3A-4B5C-D6E7F8A9B0C1">
+        <File Id="VolMonIco" Source="$(SourceDir)\volmon.ico" KeyPath="yes" />
+      </Component>
+
+    </ComponentGroup>
+
+    <!-- ── Feature ───────────────────────────────────────────────── -->
+    <Feature Id="ProductFeature" Title="VolMon" Level="1">
+      <ComponentGroupRef Id="MainFiles" />
+    </Feature>
+
+    <!--
+      ── Post-install: run register.ps1 as the current user ──────────
+
+      WiX deferred custom actions run as SYSTEM; to register Task
+      Scheduler AtLogOn tasks and Startup shortcuts for the installing
+      user we must impersonate them. We use a Type 34 (exe) action with
+      Impersonate="yes" so it runs under the logged-on user's token.
+
+      PowerShell is invoked with -NonInteractive -WindowStyle Hidden so
+      no console window appears during the MSI install UI.
+    -->
+    <SetProperty
+      Id="RunRegister"
+      Value="&quot;[%ComSpec]&quot; /c powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]register.ps1&quot;"
+      Before="RunRegister"
+      Sequence="execute" />
+
+    <CustomAction
+      Id="RunRegister"
+      BinaryRef="Wix4UtilCA_X64"
+      DllEntry="WixQuietExec64"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="ignore" />
+
+    <!--
+      On uninstall, run register.ps1 -Unregister to clean up tasks and
+      shortcuts before files are removed.
+    -->
+    <SetProperty
+      Id="RunUnregister"
+      Value="&quot;[%ComSpec]&quot; /c powershell.exe -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]register.ps1&quot; -Unregister"
+      Before="RunUnregister"
+      Sequence="execute" />
+
+    <CustomAction
+      Id="RunUnregister"
+      BinaryRef="Wix4UtilCA_X64"
+      DllEntry="WixQuietExec64"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Register after files are installed -->
+      <Custom Action="RunRegister"   After="InstallFiles">NOT Installed</Custom>
+      <!-- Unregister before files are removed -->
+      <Custom Action="RunUnregister" Before="RemoveFiles">Installed AND NOT UPGRADINGPRODUCTCODE</Custom>
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>

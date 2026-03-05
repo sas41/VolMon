@@ -83,12 +83,46 @@ jobs:
           Copy-Item install/register/register-windows.ps1 publish/win-x64/register.ps1
           Copy-Item assets/VolMonLogo.ico publish/win-x64/volmon.ico
 
+      - name: Install WiX toolset
+        shell: pwsh
+        run: dotnet tool install --global wix
+
+      - name: Add WiX extensions
+        shell: pwsh
+        run: wix extension add WixToolset.Util.wixext
+
+      - name: Generate version string
+        id: version
+        shell: pwsh
+        run: |
+          # MSI requires a numeric Major.Minor.Patch.Build version.
+          # Use today's date as Major.Minor.Patch (YYYY.MMDD.0) so it is
+          # always increasing and satisfies WiX's version constraints.
+          $v = (Get-Date -Format 'yyyy.MMdd.0')
+          echo "msi_version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          wix build install/wix/volmon.wxs `
+            -d SourceDir=publish/win-x64 `
+            -d Version=${{ steps.version.outputs.msi_version }} `
+            -arch x64 `
+            -o VolMon-win-x64.msi
+
       - name: Create zip
         shell: pwsh
         run: |
           Compress-Archive -Path publish/win-x64/* -DestinationPath VolMon-win-x64.zip
 
-      - name: Upload artifact
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolMon-win-x64-msi
+          path: VolMon-win-x64.msi
+          retention-days: 1
+
+      - name: Upload zip artifact
         uses: actions/upload-artifact@v4
         with:
           name: VolMon-win-x64
@@ -126,12 +160,39 @@ jobs:
           chmod +x publish/osx-x64/register.sh
           cp assets/VolMonLogo-256.png publish/osx-x64/volmon.png
 
+      - name: Build PKG installer
+        run: |
+          # Stage the payload under a root that mirrors the install path.
+          # pkgbuild will install everything under /usr/local/lib/volmon/.
+          mkdir -p pkg-root/usr/local/lib/volmon
+          cp -R publish/osx-x64/. pkg-root/usr/local/lib/volmon/
+
+          # The postinstall script runs register.sh as the console user.
+          mkdir -p pkg-scripts
+          cp install/macos/postinstall pkg-scripts/postinstall
+          chmod +x pkg-scripts/postinstall
+
+          pkgbuild \
+            --root pkg-root \
+            --scripts pkg-scripts \
+            --identifier com.volmon.pkg \
+            --version "$(date -u +'%Y.%m.%d')" \
+            --install-location / \
+            VolMon-osx-x64.pkg
+
       - name: Create zip
         run: |
           cd publish
           zip -r ../VolMon-osx-x64.zip osx-x64/
 
-      - name: Upload artifact
+      - name: Upload PKG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolMon-osx-x64-pkg
+          path: VolMon-osx-x64.pkg
+          retention-days: 1
+
+      - name: Upload zip artifact
         uses: actions/upload-artifact@v4
         with:
           name: VolMon-osx-x64
@@ -171,4 +232,6 @@ jobs:
           files: |
             dist/VolMon-linux-x64/VolMon-linux-x64.zip
             dist/VolMon-win-x64/VolMon-win-x64.zip
+            dist/VolMon-win-x64-msi/VolMon-win-x64.msi
             dist/VolMon-osx-x64/VolMon-osx-x64.zip
+            dist/VolMon-osx-x64-pkg/VolMon-osx-x64.pkg

@@ -26,6 +26,7 @@ public partial class MainWindow : Window
         AddHandler(DragDrop.DropEvent, OnDrop);
         AddHandler(DragDrop.DragOverEvent, OnDragOver);
         AddHandler(PointerPressedEvent, OnItemPointerPressed, RoutingStrategies.Tunnel);
+        AddHandler(PointerPressedEvent, OnItemRightClick, RoutingStrategies.Bubble);
         AddHandler(Button.ClickEvent, OnButtonClick, RoutingStrategies.Bubble);
     }
 
@@ -110,6 +111,96 @@ public partial class MainWindow : Window
 
         e.Handled = true;
         await DragDrop.DoDragDrop(e, itemData, DragDropEffects.Move);
+    }
+
+    // ── Right-click context menus ────────────────────────────────────
+
+    private void OnItemRightClick(object? sender, PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(this).Properties.IsRightButtonPressed) return;
+
+        var source = e.Source as Control;
+
+        // Right-click on a group member → "Remove from <GroupName>"
+        var memberBorder = FindParentWithClass(source, "draggableMember");
+        if (memberBorder?.Tag is GroupMemberViewModel member)
+        {
+            var groupVm = _viewModel?.Groups.FirstOrDefault(g => g.Id == member.GroupId);
+            ShowMemberContextMenu(memberBorder, member, groupVm);
+            e.Handled = true;
+            return;
+        }
+
+        // Right-click on an ignored pool item → "Remove from Ignored"
+        var poolBorder = FindParentWithClass(source, "draggablePool");
+        if (poolBorder?.Tag is PoolItemViewModel poolItem && poolItem.IsIgnored)
+        {
+            ShowIgnoredItemContextMenu(poolBorder, poolItem);
+            e.Handled = true;
+        }
+    }
+
+    private void ShowMemberContextMenu(Control anchor, GroupMemberViewModel member, GroupColumnViewModel? groupVm)
+    {
+        Flyout? flyout = null;
+
+        var groupLabel = groupVm?.Name ?? "Group";
+        var removeBtn = new Button
+        {
+            Content = $"Remove from {groupLabel}",
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Background = Brushes.Transparent,
+            Foreground = SolidColorBrush.Parse("#CCC"),
+            Padding = new Thickness(8, 4),
+        };
+        removeBtn.Click += async (_, _) =>
+        {
+            flyout?.Hide();
+            if (_viewModel is not null)
+                await _viewModel.RemoveFromGroupAsync(member.GroupId, member.ItemType, member.Identifier);
+        };
+
+        var menuPanel = new StackPanel { Width = 180, Spacing = 2 };
+        menuPanel.Children.Add(removeBtn);
+
+        flyout = new Flyout
+        {
+            Content = menuPanel,
+            Placement = PlacementMode.Pointer,
+        };
+        flyout.ShowAt(anchor);
+    }
+
+    private void ShowIgnoredItemContextMenu(Control anchor, PoolItemViewModel poolItem)
+    {
+        Flyout? flyout = null;
+
+        var unignoreBtn = new Button
+        {
+            Content = "Remove from Ignored",
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Background = Brushes.Transparent,
+            Foreground = SolidColorBrush.Parse("#CCC"),
+            Padding = new Thickness(8, 4),
+        };
+        unignoreBtn.Click += async (_, _) =>
+        {
+            flyout?.Hide();
+            if (_viewModel is not null)
+                await _viewModel.UnignoreProgramAsync(poolItem.Identifier);
+        };
+
+        var menuPanel = new StackPanel { Width = 180, Spacing = 2 };
+        menuPanel.Children.Add(unignoreBtn);
+
+        flyout = new Flyout
+        {
+            Content = menuPanel,
+            Placement = PlacementMode.Pointer,
+        };
+        flyout.ShowAt(anchor);
     }
 
     // ── Drag over ────────────────────────────────────────────────────

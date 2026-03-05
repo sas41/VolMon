@@ -739,6 +739,50 @@ public class MainViewModel : ReactiveObject
         // No need to RefreshAsync — the daemon will push a state-changed event
     }
 
+    /// <summary>
+    /// Removes a program or device from its group and returns it to the pool (without ignoring).
+    /// For programs this uses remove-program; for devices, remove-device.
+    /// </summary>
+    public async Task RemoveFromGroupAsync(Guid groupId, string itemType, string id)
+    {
+        if (_client is null) return;
+
+        if (itemType == "program")
+        {
+            await _client.SendAsync(new IpcRequest
+            {
+                Command = "remove-program",
+                GroupId = groupId,
+                ProgramName = id
+            });
+        }
+        else
+        {
+            await _client.SendAsync(new IpcRequest
+            {
+                Command = "remove-device",
+                GroupId = groupId,
+                DeviceName = id
+            });
+        }
+        // No need to RefreshAsync — the daemon will push a state-changed event
+    }
+
+    /// <summary>
+    /// Removes a program from the ignored list, returning it to the unassigned pool.
+    /// </summary>
+    public async Task UnignoreProgramAsync(string programName)
+    {
+        if (_client is null) return;
+
+        await _client.SendAsync(new IpcRequest
+        {
+            Command = "unignore-program",
+            ProgramName = programName
+        });
+        // No need to RefreshAsync — the daemon will push a state-changed event
+    }
+
     public async Task ReorderGroupAsync(Guid sourceId, Guid targetId)
     {
         if (_client is null) return;

@@ -1,0 +1,174 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  # ── Build jobs (one runner per platform) ──────────────────────────────
+
+  build-linux:
+    name: Build (linux-x64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish projects
+        run: |
+          for project in VolMon.Daemon VolMon.GUI VolMon.Hardware VolMon.HardwareGUI; do
+            dotnet publish "src/$project/$project.csproj" \
+              --configuration Release \
+              --runtime linux-x64 \
+              --self-contained \
+              -p:PublishSingleFile=true \
+              -p:IncludeNativeLibrariesForSelfExtract=true \
+              -p:PublishTrimmed=false \
+              --output publish/linux-x64 \
+              -v quiet
+          done
+
+      - name: Copy register script and icon
+        run: |
+          cp install/register/register-linux.sh publish/linux-x64/register.sh
+          chmod +x publish/linux-x64/register.sh
+          cp assets/VolMonLogo-256.png publish/linux-x64/volmon.png
+
+      - name: Create zip
+        run: |
+          cd publish
+          zip -r ../VolMon-linux-x64.zip linux-x64/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolMon-linux-x64
+          path: VolMon-linux-x64.zip
+          retention-days: 1
+
+  build-windows:
+    name: Build (win-x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish projects
+        shell: pwsh
+        run: |
+          foreach ($project in @('VolMon.Daemon', 'VolMon.GUI', 'VolMon.Hardware', 'VolMon.HardwareGUI')) {
+            dotnet publish "src/$project/$project.csproj" `
+              --configuration Release `
+              --runtime win-x64 `
+              --self-contained `
+              -p:PublishSingleFile=true `
+              -p:IncludeNativeLibrariesForSelfExtract=true `
+              -p:PublishTrimmed=false `
+              --output publish/win-x64 `
+              -v quiet
+          }
+
+      - name: Copy register script and icon
+        shell: pwsh
+        run: |
+          Copy-Item install/register/register-windows.ps1 publish/win-x64/register.ps1
+          Copy-Item assets/VolMonLogo.ico publish/win-x64/volmon.ico
+
+      - name: Create zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path publish/win-x64/* -DestinationPath VolMon-win-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolMon-win-x64
+          path: VolMon-win-x64.zip
+          retention-days: 1
+
+  build-macos:
+    name: Build (osx-x64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish projects
+        run: |
+          for project in VolMon.Daemon VolMon.GUI VolMon.Hardware VolMon.HardwareGUI; do
+            dotnet publish "src/$project/$project.csproj" \
+              --configuration Release \
+              --runtime osx-x64 \
+              --self-contained \
+              -p:PublishSingleFile=true \
+              -p:IncludeNativeLibrariesForSelfExtract=true \
+              -p:PublishTrimmed=false \
+              --output publish/osx-x64 \
+              -v quiet
+          done
+
+      - name: Copy register script and icon
+        run: |
+          cp install/register/register-macos.sh publish/osx-x64/register.sh
+          chmod +x publish/osx-x64/register.sh
+          cp assets/VolMonLogo-256.png publish/osx-x64/volmon.png
+
+      - name: Create zip
+        run: |
+          cd publish
+          zip -r ../VolMon-osx-x64.zip osx-x64/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolMon-osx-x64
+          path: VolMon-osx-x64.zip
+          retention-days: 1
+
+  # ── Release job (runs after all three builds succeed) ─────────────────
+
+  release:
+    name: Publish GitHub Release
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Generate release tag
+        id: tag
+        run: |
+          TAG="v$(date -u +'%Y.%m.%d')-$(git rev-parse --short HEAD)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/VolMon-linux-x64/VolMon-linux-x64.zip
+            dist/VolMon-win-x64/VolMon-win-x64.zip
+            dist/VolMon-osx-x64/VolMon-osx-x64.zip

@@ -94,18 +94,11 @@ jobs:
       - name: Generate version string
         id: version
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          # Count how many workflow runs have completed today (UTC) for this workflow.
-          # That count becomes the daily build index, giving YY.MM.DDxxx.
-          $today    = (Get-Date -Format 'yyyy-MM-dd')
-          $repoSlug = "${{ github.repository }}"
-          $runs     = gh api "repos/$repoSlug/actions/workflows/release.yml/runs?per_page=100&created=>=$today" `
-                        --jq '.workflow_runs | length'
-          $idx      = [int]$runs
+          # GITHUB_RUN_NUMBER is a free, always-incrementing per-workflow counter.
+          # MSI build field max is 65535, so this is good for 65535 releases.
           $datePart = (Get-Date -Format 'yy.MM.dd')
-          $v        = "$datePart$($idx.ToString('000'))"
+          $v        = "$datePart.${{ github.run_number }}"
           echo "msi_version=$v" >> $env:GITHUB_OUTPUT
 
       - name: Build MSI

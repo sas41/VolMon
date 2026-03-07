@@ -45,28 +45,29 @@ Binaries are self-contained — no .NET runtime required.
 
 Prerequisites: PulseAudio or PipeWire, and `libusb-1.0` if you use hardware devices.
 
-Extract the zip to a permanent location, then run the registration script:
+Extract the zip and run the installer:
 
 ```bash
-unzip VolMon-linux-x64.zip -d ~/.local/lib/volmon
-cd ~/.local/lib/volmon
-chmod +x register.sh
-./register.sh
+unzip VolMon-linux-x64.zip
+cd linux-x64
+./install-linux.sh
 ```
 
-`register.sh` registers the daemon as a systemd user service, adds the GUI to
-autostart, and installs desktop entries and the icon. The daemon starts immediately.
+`install-linux.sh` copies binaries to `~/.local/lib/volmon/`, writes launcher
+scripts to `~/.local/bin/`, registers the daemon as a systemd user service, adds
+the GUI to autostart, and installs desktop entries and the icon. The daemon starts
+immediately.
 
-To also register the hardware daemon and hardware GUI:
+To also install the hardware daemon and hardware GUI:
 
 ```bash
-./register.sh --include-hardware
+./install-linux.sh --include-hardware
 ```
 
-To unregister everything (stops services, removes all entries and the icon):
+To uninstall everything (stops services, removes all files):
 
 ```bash
-./register.sh --unregister
+./install-linux.sh --uninstall
 ```
 
 ### Windows

@@ -58,11 +58,11 @@
     <ComponentGroup Id="CoreFiles" Directory="INSTALLFOLDER">
 
       <Component Id="DaemonExe" Guid="A1B2C3D4-E5F6-7A8B-9C0D-E1F2A3B4C5D6">
-        <File Id="VolMonDaemon" Source="$(SourceDir)\VolMon.Daemon.exe" KeyPath="yes" />
+        <File Id="VolMonDaemon" Source="$(SourceDir)\daemon\VolMon.Daemon.exe" KeyPath="yes" />
       </Component>
 
       <Component Id="GuiExe" Guid="B2C3D4E5-F6A7-8B9C-0D1E-F2A3B4C5D6E7">
-        <File Id="VolMonGUI" Source="$(SourceDir)\VolMon.GUI.exe" KeyPath="yes" />
+        <File Id="VolMonGUI" Source="$(SourceDir)\gui\VolMon.GUI.exe" KeyPath="yes" />
       </Component>
 
       <Component Id="RegisterScript" Guid="E5F6A7B8-C9D0-1E2F-3A4B-C5D6E7F8A9B0">
@@ -79,26 +79,26 @@
     <ComponentGroup Id="HardwareFiles" Directory="INSTALLFOLDER">
 
       <Component Id="HardwareExe" Guid="C3D4E5F6-A7B8-9C0D-1E2F-A3B4C5D6E7F8">
-        <File Id="VolMonHardware" Source="$(SourceDir)\VolMon.Hardware.exe" KeyPath="yes" />
+        <File Id="VolMonHardware" Source="$(SourceDir)\hardware\VolMon.Hardware.exe" KeyPath="yes" />
       </Component>
 
       <Component Id="HardwareGuiExe" Guid="D4E5F6A7-B8C9-0D1E-2F3A-B4C5D6E7F8A9">
-        <File Id="VolMonHardwareGUI" Source="$(SourceDir)\VolMon.HardwareGUI.exe" KeyPath="yes" />
+        <File Id="VolMonHardwareGUI" Source="$(SourceDir)\hardware-gui\VolMon.HardwareGUI.exe" KeyPath="yes" />
       </Component>
 
       <!-- Layout JSON files — installed to Hardware\Beacn\Mix\Layouts\ -->
       <Component Id="LayoutFiles" Guid="A7B8C9D0-E1F2-3A4B-5C6D-E7F8A9B0C1D2" Directory="LayoutsDir">
-        <File Id="Layout_DefaultVertical" Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_default-vertical.json"  KeyPath="yes" />
-        <File Id="Layout_HorizontalBars"  Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_horizontal-bars.json" />
-        <File Id="Layout_CompactGrid"     Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_compact-grid.json" />
-        <File Id="Layout_HorseshoeGauges" Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_horseshoe-gauges.json" />
+        <File Id="Layout_DefaultVertical" Source="$(SourceDir)\hardware\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_default-vertical.json"  KeyPath="yes" />
+        <File Id="Layout_HorizontalBars"  Source="$(SourceDir)\hardware\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_horizontal-bars.json" />
+        <File Id="Layout_CompactGrid"     Source="$(SourceDir)\hardware\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_compact-grid.json" />
+        <File Id="Layout_HorseshoeGauges" Source="$(SourceDir)\hardware\Hardware\Beacn\Mix\Layouts\VolMon_Layout_BeacnMix_horseshoe-gauges.json" />
       </Component>
 
       <!-- Bundled fonts — installed to Hardware\Beacn\Mix\Layouts\Fonts\ -->
       <Component Id="LayoutFonts" Guid="B8C9D0E1-F2A3-4B5C-6D7E-F8A9B0C1D2E3" Directory="LayoutsFontsDir">
-        <File Id="Font_MontserratRegular" Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\Fonts\Montserrat-Regular.ttf" KeyPath="yes" />
-        <File Id="Font_MontserratBold"    Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\Fonts\Montserrat-Bold.ttf" />
-        <File Id="Font_MontserratLicense" Source="$(SourceDir)\Hardware\Beacn\Mix\Layouts\Fonts\Montserrat-OFL.txt" />
+        <File Id="Font_MontserratRegular" Source="$(SourceDir)\hardware\Hardware\Beacn\Mix\Layouts\Fonts\Montserrat-Regular.ttf" KeyPath="yes" />
+        <File Id="Font_MontserratBold"    Source="$(SourceDir)\hardware\Hardware\Beacn\Mix\Layouts\Fonts\Montserrat-Bold.ttf" />
+        <File Id="Font_MontserratLicense" Source="$(SourceDir)\hardware\Hardware\Beacn\Mix\Layouts\Fonts\Montserrat-OFL.txt" />
       </Component>
 
     </ComponentGroup>

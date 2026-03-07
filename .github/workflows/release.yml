@@ -21,23 +21,28 @@ jobs:
 
       - name: Publish projects
         run: |
+          declare -A folders=(
+            [VolMon.Daemon]=daemon
+            [VolMon.GUI]=gui
+            [VolMon.Hardware]=hardware
+            [VolMon.HardwareGUI]=hardware-gui
+          )
           for project in VolMon.Daemon VolMon.GUI VolMon.Hardware VolMon.HardwareGUI; do
+            folder=${folders[$project]}
             dotnet publish "src/$project/$project.csproj" \
               --configuration Release \
               --runtime linux-x64 \
               --self-contained \
-              -p:PublishSingleFile=true \
-              -p:IncludeNativeLibrariesForSelfExtract=true \
               -p:PublishTrimmed=false \
-              --output publish/linux-x64 \
+              --output "publish/linux-x64/app/$folder" \
               -v quiet
           done
 
-      - name: Copy register script and icon
+      - name: Copy installer and icon
         run: |
-          cp install/register/register-linux.sh publish/linux-x64/register.sh
-          chmod +x publish/linux-x64/register.sh
-          cp assets/VolMonLogo-256.png publish/linux-x64/volmon.png
+          cp install/install-linux.sh publish/linux-x64/install-linux.sh
+          chmod +x publish/linux-x64/install-linux.sh
+          cp assets/VolMonLogo-256.png publish/linux-x64/app/volmon.png
 
       - name: Create zip
         run: |
@@ -65,15 +70,20 @@ jobs:
       - name: Publish projects
         shell: pwsh
         run: |
-          foreach ($project in @('VolMon.Daemon', 'VolMon.GUI', 'VolMon.Hardware', 'VolMon.HardwareGUI')) {
+          $projects = @{
+            'VolMon.Daemon'      = 'daemon'
+            'VolMon.GUI'         = 'gui'
+            'VolMon.Hardware'    = 'hardware'
+            'VolMon.HardwareGUI' = 'hardware-gui'
+          }
+          foreach ($project in $projects.Keys) {
+            $folder = $projects[$project]
             dotnet publish "src/$project/$project.csproj" `
               --configuration Release `
               --runtime win-x64 `
               --self-contained `
-              -p:PublishSingleFile=true `
-              -p:IncludeNativeLibrariesForSelfExtract=true `
               -p:PublishTrimmed=false `
-              --output publish/win-x64 `
+              --output "publish/win-x64/$folder" `
               -v quiet
           }
 
@@ -143,15 +153,20 @@ jobs:
 
       - name: Publish projects
         run: |
+          declare -A folders=(
+            [VolMon.Daemon]=daemon
+            [VolMon.GUI]=gui
+            [VolMon.Hardware]=hardware
+            [VolMon.HardwareGUI]=hardware-gui
+          )
           for project in VolMon.Daemon VolMon.GUI VolMon.Hardware VolMon.HardwareGUI; do
+            folder=${folders[$project]}
             dotnet publish "src/$project/$project.csproj" \
               --configuration Release \
               --runtime osx-x64 \
               --self-contained \
-              -p:PublishSingleFile=true \
-              -p:IncludeNativeLibrariesForSelfExtract=true \
               -p:PublishTrimmed=false \
-              --output publish/osx-x64 \
+              --output "publish/osx-x64/$folder" \
               -v quiet
           done
 

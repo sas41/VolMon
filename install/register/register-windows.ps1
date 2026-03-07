@@ -35,10 +35,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ScriptDir        = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$DaemonExe        = Join-Path $ScriptDir 'VolMon.Daemon.exe'
-$GuiExe           = Join-Path $ScriptDir 'VolMon.GUI.exe'
-$HardwareExe      = Join-Path $ScriptDir 'VolMon.Hardware.exe'
-$HardwareGuiExe   = Join-Path $ScriptDir 'VolMon.HardwareGUI.exe'
+$DaemonExe        = Join-Path $ScriptDir 'daemon\VolMon.Daemon.exe'
+$GuiExe           = Join-Path $ScriptDir 'gui\VolMon.GUI.exe'
+$HardwareExe      = Join-Path $ScriptDir 'hardware\VolMon.Hardware.exe'
+$HardwareGuiExe   = Join-Path $ScriptDir 'hardware-gui\VolMon.HardwareGUI.exe'
 $IconFile         = Join-Path $ScriptDir 'volmon.ico'
 $TaskName         = 'VolMon Daemon'
 $HardwareTaskName = 'VolMon Hardware Daemon'

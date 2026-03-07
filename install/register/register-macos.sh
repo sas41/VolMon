@@ -19,10 +19,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DAEMON_BIN="$SCRIPT_DIR/VolMon.Daemon"
-GUI_BIN="$SCRIPT_DIR/VolMon.GUI"
-HARDWARE_BIN="$SCRIPT_DIR/VolMon.Hardware"
-HARDWARE_GUI_BIN="$SCRIPT_DIR/VolMon.HardwareGUI"
+DAEMON_BIN="$SCRIPT_DIR/daemon/VolMon.Daemon"
+GUI_BIN="$SCRIPT_DIR/gui/VolMon.GUI"
+HARDWARE_BIN="$SCRIPT_DIR/hardware/VolMon.Hardware"
+HARDWARE_GUI_BIN="$SCRIPT_DIR/hardware-gui/VolMon.HardwareGUI"
 ICON_SRC="$SCRIPT_DIR/volmon.png"
 
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"

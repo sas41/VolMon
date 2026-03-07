@@ -233,10 +233,17 @@ public sealed class StreamWatcher : IDisposable
             {
                 try
                 {
-                    await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
-                    await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
-                    stream.Volume = group.Volume;
-                    stream.Muted = group.Muted;
+                    if (stream.Volume != group.Volume)
+                    {
+                        await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
+                        stream.Volume = group.Volume;
+                    }
+
+                    if (stream.Muted != group.Muted)
+                    {
+                        await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
+                        stream.Muted = group.Muted;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -248,16 +255,23 @@ public sealed class StreamWatcher : IDisposable
         }
         else
         {
-            // Direct mode: set stream volume directly.
+            // Direct mode: set stream volume directly, only if it differs.
             var streams = _activeStreams.Values.Where(s => s.AssignedGroup == group.Id).ToArray();
             foreach (var stream in streams)
             {
                 try
                 {
-                    await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
-                    await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
-                    stream.Volume = group.Volume;
-                    stream.Muted = group.Muted;
+                    if (stream.Volume != group.Volume)
+                    {
+                        await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
+                        stream.Volume = group.Volume;
+                    }
+
+                    if (stream.Muted != group.Muted)
+                    {
+                        await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
+                        stream.Muted = group.Muted;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -272,10 +286,17 @@ public sealed class StreamWatcher : IDisposable
         {
             try
             {
-                await _backend.SetDeviceVolumeAsync(device.Name, group.Volume, ct);
-                await _backend.SetDeviceMuteAsync(device.Name, group.Muted, ct);
-                device.Volume = group.Volume;
-                device.Muted = group.Muted;
+                if (device.Volume != group.Volume)
+                {
+                    await _backend.SetDeviceVolumeAsync(device.Name, group.Volume, ct);
+                    device.Volume = group.Volume;
+                }
+
+                if (device.Muted != group.Muted)
+                {
+                    await _backend.SetDeviceMuteAsync(device.Name, group.Muted, ct);
+                    device.Muted = group.Muted;
+                }
             }
             catch (Exception ex)
             {
@@ -540,10 +561,17 @@ public sealed class StreamWatcher : IDisposable
                 if (_streamsOnVirtualSinks.Remove(stream.Id))
                     await _backend.MoveStreamToSinkAsync(stream.Id, "@DEFAULT_SINK@", ct);
 
-                await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
-                await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
-                stream.Volume = group.Volume;
-                stream.Muted = group.Muted;
+                if (stream.Volume != group.Volume)
+                {
+                    await _backend.SetStreamVolumeAsync(stream.Id, group.Volume, ct);
+                    stream.Volume = group.Volume;
+                }
+
+                if (stream.Muted != group.Muted)
+                {
+                    await _backend.SetStreamMuteAsync(stream.Id, group.Muted, ct);
+                    stream.Muted = group.Muted;
+                }
             }
         }
         catch (Exception ex)
@@ -565,10 +593,17 @@ public sealed class StreamWatcher : IDisposable
 
         try
         {
-            await _backend.SetDeviceVolumeAsync(device.Name, group.Volume, ct);
-            await _backend.SetDeviceMuteAsync(device.Name, group.Muted, ct);
-            device.Volume = group.Volume;
-            device.Muted = group.Muted;
+            if (device.Volume != group.Volume)
+            {
+                await _backend.SetDeviceVolumeAsync(device.Name, group.Volume, ct);
+                device.Volume = group.Volume;
+            }
+
+            if (device.Muted != group.Muted)
+            {
+                await _backend.SetDeviceMuteAsync(device.Name, group.Muted, ct);
+                device.Muted = group.Muted;
+            }
         }
         catch (Exception ex)
         {
@@ -671,16 +706,20 @@ public sealed class StreamWatcher : IDisposable
             return;
         }
 
-        try
+        // Skip the move if the stream is already tracked as being on this virtual sink.
+        if (!_streamsOnVirtualSinks.Contains(stream.Id))
         {
-            await _backend.MoveStreamToSinkAsync(stream.Id, vsink.SinkName, ct);
-            _streamsOnVirtualSinks.Add(stream.Id);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex,
-                "Failed to route stream {StreamId} to virtual sink '{SinkName}'",
-                stream.Id, vsink.SinkName);
+            try
+            {
+                await _backend.MoveStreamToSinkAsync(stream.Id, vsink.SinkName, ct);
+                _streamsOnVirtualSinks.Add(stream.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex,
+                    "Failed to route stream {StreamId} to virtual sink '{SinkName}'",
+                    stream.Id, vsink.SinkName);
+            }
         }
     }
 

@@ -19,7 +19,7 @@ jobs:
       - name: Generate tag
         id: tag
         run: |
-          TAG="v$(date -u +'%Y-%m-%d')-$(git rev-parse --short HEAD)"
+          TAG="v$(date -u +'%Y-%m-%d-%H%M')-$(git rev-parse --short HEAD)"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "release_name=VolMon $TAG" >> "$GITHUB_OUTPUT"
 
@@ -38,6 +38,8 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Publish projects
+        env:
+          RELEASE_DIR: VolMon-${{ needs.version.outputs.tag }}-linux-x64
         run: |
           declare -A folders=(
             [VolMon.Daemon]=daemon
@@ -52,20 +54,24 @@ jobs:
               --runtime linux-x64 \
               --self-contained \
               -p:PublishTrimmed=false \
-              --output "publish/linux-x64/app/$folder" \
+              --output "publish/$RELEASE_DIR/app/$folder" \
               -v quiet
           done
 
       - name: Copy installer and icon
+        env:
+          RELEASE_DIR: VolMon-${{ needs.version.outputs.tag }}-linux-x64
         run: |
-          cp install/install-linux.sh publish/linux-x64/install-linux.sh
-          chmod +x publish/linux-x64/install-linux.sh
-          cp assets/VolMonLogo-256.png publish/linux-x64/app/volmon.png
+          cp install/install-linux.sh "publish/$RELEASE_DIR/install-linux.sh"
+          chmod +x "publish/$RELEASE_DIR/install-linux.sh"
+          cp assets/VolMonLogo-256.png "publish/$RELEASE_DIR/app/volmon.png"
 
       - name: Create zip
+        env:
+          RELEASE_DIR: VolMon-${{ needs.version.outputs.tag }}-linux-x64
         run: |
           cd publish
-          zip -r ../VolMon-${{ needs.version.outputs.tag }}-linux-x64.zip linux-x64/
+          zip -r ../VolMon-${{ needs.version.outputs.tag }}-linux-x64.zip "$RELEASE_DIR/"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -88,6 +94,8 @@ jobs:
 
       - name: Publish projects
         shell: pwsh
+        env:
+          RELEASE_DIR: VolMon-${{ needs.version.outputs.tag }}-win-x64
         run: |
           $projects = @{
             'VolMon.Daemon'      = 'daemon'
@@ -102,15 +110,17 @@ jobs:
               --runtime win-x64 `
               --self-contained `
               -p:PublishTrimmed=false `
-              --output "publish/win-x64/$folder" `
+              --output "publish/$env:RELEASE_DIR/$folder" `
               -v quiet
           }
 
       - name: Copy register script and icon
         shell: pwsh
+        env:
+          RELEASE_DIR: VolMon-${{ needs.version.outputs.tag }}-win-x64
         run: |
-          Copy-Item install/register/register-windows.ps1 publish/win-x64/register.ps1
-          Copy-Item assets/VolMonLogo.ico publish/win-x64/volmon.ico
+          Copy-Item install/register/register-windows.ps1 "publish/$env:RELEASE_DIR/register.ps1"
+          Copy-Item assets/VolMonLogo.ico "publish/$env:RELEASE_DIR/volmon.ico"
 
       - name: Install WiX toolset
         shell: pwsh
@@ -132,18 +142,22 @@ jobs:
 
       - name: Build MSI
         shell: pwsh
+        env:
+          RELEASE_DIR: VolMon-${{ needs.version.outputs.tag }}-win-x64
         run: |
           wix build install/wix/volmon.wxs `
             -ext WixToolset.UI.wixext `
-            -d SourceDir=publish/win-x64 `
+            -d "SourceDir=publish/$env:RELEASE_DIR" `
             -d Version=${{ steps.version.outputs.msi_version }} `
             -arch x64 `
             -o "VolMon-${{ needs.version.outputs.tag }}-win-x64.msi"
 
       - name: Create zip
         shell: pwsh
+        env:
+          RELEASE_DIR: VolMon-${{ needs.version.outputs.tag }}-win-x64
         run: |
-          Compress-Archive -Path publish/win-x64/* -DestinationPath "VolMon-${{ needs.version.outputs.tag }}-win-x64.zip"
+          Compress-Archive -Path "publish/$env:RELEASE_DIR" -DestinationPath "VolMon-${{ needs.version.outputs.tag }}-win-x64.zip"
 
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
@@ -172,6 +186,8 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Publish projects
+        env:
+          RELEASE_DIR: VolMon-${{ needs.version.outputs.tag }}-osx-x64
         run: |
           publish() {
             local project="$1" folder="$2"
@@ -180,7 +196,7 @@ jobs:
               --runtime osx-x64 \
               --self-contained \
               -p:PublishTrimmed=false \
-              --output "publish/osx-x64/$folder" \
+              --output "publish/$RELEASE_DIR/$folder" \
               -v quiet
           }
           publish VolMon.Daemon      daemon
@@ -189,15 +205,19 @@ jobs:
           publish VolMon.HardwareGUI hardware-gui
 
       - name: Copy register script and icon
+        env:
+          RELEASE_DIR: VolMon-${{ needs.version.outputs.tag }}-osx-x64
         run: |
-          cp install/register/register-macos.sh publish/osx-x64/register.sh
-          chmod +x publish/osx-x64/register.sh
-          cp assets/VolMonLogo-256.png publish/osx-x64/volmon.png
+          cp install/register/register-macos.sh "publish/$RELEASE_DIR/register.sh"
+          chmod +x "publish/$RELEASE_DIR/register.sh"
+          cp assets/VolMonLogo-256.png "publish/$RELEASE_DIR/volmon.png"
 
       - name: Build PKG installer
+        env:
+          RELEASE_DIR: VolMon-${{ needs.version.outputs.tag }}-osx-x64
         run: |
           mkdir -p pkg-root/usr/local/lib/volmon
-          cp -R publish/osx-x64/. pkg-root/usr/local/lib/volmon/
+          cp -R "publish/$RELEASE_DIR/." pkg-root/usr/local/lib/volmon/
 
           mkdir -p pkg-scripts
           cp install/macos/postinstall pkg-scripts/postinstall
@@ -212,9 +232,11 @@ jobs:
             "VolMon-${{ needs.version.outputs.tag }}-osx-x64.pkg"
 
       - name: Create zip
+        env:
+          RELEASE_DIR: VolMon-${{ needs.version.outputs.tag }}-osx-x64
         run: |
           cd publish
-          zip -r "../VolMon-${{ needs.version.outputs.tag }}-osx-x64.zip" osx-x64/
+          zip -r "../VolMon-${{ needs.version.outputs.tag }}-osx-x64.zip" "$RELEASE_DIR/"
 
       - name: Upload PKG artifact
         uses: actions/upload-artifact@v4
